@@ -30,12 +30,13 @@ String write_prefix = "ATC_BMW";
 unsigned long gps_fix_duration = 30000;
 unsigned int gps_fix_tries = 2;
 
+
 // State variables
 bool running = false;
 unsigned long iteration_counter = 0;
 unsigned long last_loop_time = 0;
-unsigned long gps_epoch_time = 0;
-unsigned long gps_board_time = 0;
+unsigned long gps_epoch_time = 0;  // Unix timestamp from GPS
+unsigned long gps_board_time = 0;  // millis() when GPS time was captured
 bool button_pressed = false;
 bool last_button_state = HIGH;
 
@@ -46,7 +47,6 @@ unsigned long last_skipped_count = 0;
 // GPS variables
 float latitude = 0.0;
 float longitude = 0.0;
-float altitude = 0.0;
 bool gps_fix = false;
 uint8_t gps_satellites = 0;
 float gps_hdop = 99.9; // Horizontal dilution of precision
@@ -54,15 +54,14 @@ float gps_hdop = 99.9; // Horizontal dilution of precision
 // MPU-6500 variables
 float accel_x, accel_y, accel_z;
 float gyro_x, gyro_y, gyro_z;
-float temperature;
 
-// Compressed data buffer structure (32 bytes vs 45 bytes)
+// Compressed data buffer structure (28 bytes vs 45 bytes)
 struct TelemetryData {
-  unsigned long timestamp;           // 4 bytes
+  uint16_t days_since_1970;          // 2 bytes (days since Unix epoch)
+  uint32_t milliseconds_in_day;      // 4 bytes (1ms precision within day)
   int16_t accel_x, accel_y, accel_z;  // 6 bytes (16-bit compressed)
   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)
-  int16_t temperature;               // 2 bytes (16-bit compressed)
-  float latitude, longitude, altitude; // 12 bytes (keep float for GPS precision)
+  float latitude, longitude;         // 8 bytes (keep float for GPS precision)
   uint16_t gps_status_packed;        // 2 bytes (bit-packed GPS/timing data)
   // Bit layout: [15:11]=iterations_skipped, [10:6]=satellites, [5:1]=accuracy, [0]=has_gps
 };
@@ -398,13 +397,6 @@ void collectTelemetry() {
   int16_t ay = Wire.read() << 8 | Wire.read();
   int16_t az = Wire.read() << 8 | Wire.read();
 
-  // Read temperature data
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x41); // TEMP_OUT_H
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 2, true);
-
-  int16_t temp_raw = Wire.read() << 8 | Wire.read();
 
   // Read gyroscope data
   Wire.beginTransmission(MPU_ADDR);
@@ -421,8 +413,6 @@ void collectTelemetry() {
   accel_y = ay / 16384.0;
   accel_z = az / 16384.0;
 
-  temperature = (temp_raw / 340.0) + 36.53; // Convert to Celsius
-
   gyro_x = gx / 131.0; // ±250°/s range
   gyro_y = gy / 131.0;
   gyro_z = gz / 131.0;
@@ -433,17 +423,17 @@ void collectTelemetry() {
     unsigned long skipped_delta = total_iterations_skipped - last_skipped_count;
     last_skipped_count = total_iterations_skipped;
 
-    data_buffer[buffer_index].timestamp = getCurrentEpochTime();
+    // Get current timestamp with 1ms precision
+    getCurrentTimestamp(&data_buffer[buffer_index].days_since_1970, &data_buffer[buffer_index].milliseconds_in_day);
+    
     data_buffer[buffer_index].accel_x = encodeAccel(accel_x);
     data_buffer[buffer_index].accel_y = encodeAccel(accel_y);
     data_buffer[buffer_index].accel_z = encodeAccel(accel_z);
     data_buffer[buffer_index].gyro_x = encodeGyro(gyro_x);
     data_buffer[buffer_index].gyro_y = encodeGyro(gyro_y);
     data_buffer[buffer_index].gyro_z = encodeGyro(gyro_z);
-    data_buffer[buffer_index].temperature = encodeTemperature(temperature);
     data_buffer[buffer_index].latitude = latitude;
     data_buffer[buffer_index].longitude = longitude;
-    data_buffer[buffer_index].altitude = altitude;
     // Pack GPS status with bit manipulation
     bool has_gps = (iteration_counter % gps_interval == 0);
     data_buffer[buffer_index].gps_status_packed = packGPSStatus(has_gps, gps_hdop, gps_satellites, skipped_delta);
@@ -501,7 +491,6 @@ bool parseGPSData(String data) {
       String fix_str = data.substring(comma_positions[5] + 1, comma_positions[6]);
       String sat_str = data.substring(comma_positions[6] + 1, comma_positions[7]);
       String hdop_str = data.substring(comma_positions[7] + 1, comma_positions[8]);
-      String alt_str = data.substring(comma_positions[8] + 1, comma_positions[9]);
 
       // Update satellite count (field 7 in GGA sentence)
       if (sat_str.length() > 0) {
@@ -517,7 +506,6 @@ bool parseGPSData(String data) {
       if (fix_str.toInt() > 0 && lat_str.length() > 0 && lon_str.length() > 0) {
         latitude = convertNMEACoordinate(lat_str);
         longitude = convertNMEACoordinate(lon_str);
-        altitude = alt_str.toFloat();
         gps_fix = true;
         return true;
       }
@@ -621,10 +609,20 @@ unsigned long convertGPSTimeToEpoch(String time_str, String date_str) {
   return epoch;
 }
 
-unsigned long getCurrentEpochTime() {
+void getCurrentTimestamp(uint16_t* days_since_1970, uint32_t* milliseconds_in_day) {
   unsigned long current_board_time = millis();
   unsigned long elapsed_since_gps = current_board_time - gps_board_time;
-  return gps_epoch_time + (elapsed_since_gps / 1000);
+  
+  // Calculate current Unix timestamp with millisecond precision
+  unsigned long current_unix_seconds = gps_epoch_time + (elapsed_since_gps / 1000);
+  unsigned long current_ms_in_second = elapsed_since_gps % 1000;
+  
+  // Calculate days since Unix epoch (Jan 1, 1970)
+  *days_since_1970 = (uint16_t)(current_unix_seconds / 86400UL);  // 86400 seconds per day
+  
+  // Calculate milliseconds within the current day
+  unsigned long seconds_in_day = current_unix_seconds % 86400UL;
+  *milliseconds_in_day = (seconds_in_day * 1000UL) + current_ms_in_second;
 }
 
 void writeDataToSD() {
@@ -650,11 +648,12 @@ void writeDataToSD() {
 }
 
 String generateFilename() {
-  unsigned long oldest_time = data_buffer[0].timestamp;
+  // Reconstruct Unix timestamp from split format for filename
+  unsigned long unix_seconds = (data_buffer[0].days_since_1970 * 86400UL) + (data_buffer[0].milliseconds_in_day / 1000UL);
 
-  // Use last 8 digits of epoch for strict 8.3 format
+  // Use last 8 digits of Unix timestamp for strict 8.3 format
   // Format: XXXXXXXX.ATC (exactly 8 chars + 3 char extension)
-  String timestamp_str = String(oldest_time);
+  String timestamp_str = String(unix_seconds);
   String filename;
 
   if (timestamp_str.length() >= 8) {
@@ -775,13 +774,6 @@ int16_t encodeGyro(float gyro_deg_s) {
   return (int16_t)scaled;
 }
 
-int16_t encodeTemperature(float temp_c) {
-  // Scale: -40°C to +85°C range with 0.002°C precision
-  float scaled = (temp_c + 50.0) * 512.0;
-  if (scaled > 32767.0) scaled = 32767.0;
-  if (scaled < -32768.0) scaled = -32768.0;
-  return (int16_t)scaled;
-}
 
 // Bit packing function for GPS status
 uint16_t packGPSStatus(bool has_gps, float hdop, uint8_t satellites, unsigned long iterations_skipped) {

@@ -18,26 +18,26 @@ import os
 import struct
 import csv
 from pathlib import Path
+from datetime import datetime, timezone
 
 # Data structure matching Arduino compressed TelemetryData struct
 # struct TelemetryData {
-#   unsigned long timestamp;           // 4 bytes
+#   uint16_t days_since_1970;          // 2 bytes (days since Unix epoch)
+#   uint32_t milliseconds_in_day;      // 4 bytes (1ms precision within day)
 #   int16_t accel_x, accel_y, accel_z;  // 6 bytes (16-bit compressed)
-#   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)  
-#   int16_t temperature;               // 2 bytes (16-bit compressed)
-#   float latitude, longitude, altitude; // 12 bytes (keep float for GPS precision)
+#   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)
+#   float latitude, longitude;         // 8 bytes (keep float for GPS precision)
 #   uint16_t gps_status_packed;        // 2 bytes (bit-packed GPS/timing data)
-# } = 32 bytes total
+# } = 28 bytes total
 
-TELEMETRY_STRUCT_FORMAT = '<LhhhhhhhfffH'  # Little endian: ulong + 7×int16 + 3×float + uint16
+TELEMETRY_STRUCT_FORMAT = '<HLhhhhhhffH'  # Little endian: uint16 + uint32 + 6×int16 + 2×float + uint16
 TELEMETRY_STRUCT_SIZE = struct.calcsize(TELEMETRY_STRUCT_FORMAT)
 
 CSV_HEADERS = [
     'timestamp',
     'accel_x', 'accel_y', 'accel_z',
     'gyro_x', 'gyro_y', 'gyro_z',
-    'temperature',
-    'latitude', 'longitude', 'altitude',
+    'latitude', 'longitude',
     'has_gps_data',
     'gps_satellites',
     'gps_satellites_clamped',
@@ -56,9 +56,6 @@ def decode_gyro(int16_val):
     """Convert 16-bit gyroscope value back to degrees/second."""
     return int16_val / 131.0
 
-def decode_temperature(int16_val):
-    """Convert 16-bit temperature value back to Celsius."""
-    return (int16_val / 512.0) - 50.0
 
 def unpack_gps_status(packed_uint16):
     """Unpack GPS status from 16-bit packed value.
@@ -84,6 +81,17 @@ def unpack_gps_status(packed_uint16):
     
     return (has_gps, gps_accuracy, gps_satellites, iterations_skipped, 
             accuracy_clamped, satellites_clamped, skipped_clamped)
+
+def convert_split_timestamp(days_since_1970, milliseconds_in_day):
+    """Convert split timestamp format to Unix timestamp with millisecond precision."""
+    # Calculate Unix timestamp in seconds
+    unix_seconds = days_since_1970 * 86400  # 86400 seconds per day
+    unix_seconds += milliseconds_in_day // 1000  # Add seconds from milliseconds
+    
+    # Calculate fractional seconds
+    fractional_seconds = (milliseconds_in_day % 1000) / 1000.0
+    
+    return unix_seconds + fractional_seconds
 
 def parse_telemetry_file(input_file_path, output_file_path):
     """Parse a single binary telemetry file and convert to CSV."""
@@ -118,24 +126,22 @@ def parse_telemetry_file(input_file_path, output_file_path):
                 unpacked = struct.unpack(TELEMETRY_STRUCT_FORMAT, record_data)
                 
                 # Decode compressed values back to physical units
-                # unpacked = (timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, temp, lat, lon, alt, gps_status_packed)
+                # unpacked = (days_since_1970, milliseconds_in_day, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, lat, lon, gps_status_packed)
                 
                 # Unpack GPS status bits
-                gps_status = unpack_gps_status(unpacked[11])
+                gps_status = unpack_gps_status(unpacked[10])
                 has_gps, accuracy, satellites, skipped, acc_clamped, sat_clamped, skip_clamped = gps_status
                 
                 decoded_record = (
-                    unpacked[0],  # timestamp (unchanged)
-                    decode_accel(unpacked[1]),  # accel_x
-                    decode_accel(unpacked[2]),  # accel_y  
-                    decode_accel(unpacked[3]),  # accel_z
-                    decode_gyro(unpacked[4]),   # gyro_x
-                    decode_gyro(unpacked[5]),   # gyro_y
-                    decode_gyro(unpacked[6]),   # gyro_z
-                    decode_temperature(unpacked[7]),  # temperature
+                    convert_split_timestamp(unpacked[0], unpacked[1]),  # timestamp (convert from split format)
+                    decode_accel(unpacked[2]),  # accel_x
+                    decode_accel(unpacked[3]),  # accel_y  
+                    decode_accel(unpacked[4]),  # accel_z
+                    decode_gyro(unpacked[5]),   # gyro_x
+                    decode_gyro(unpacked[6]),   # gyro_y
+                    decode_gyro(unpacked[7]),   # gyro_z
                     unpacked[8],  # latitude (unchanged)
                     unpacked[9],  # longitude (unchanged)
-                    unpacked[10], # altitude (unchanged)
                     has_gps,      # has_gps_data (unpacked)
                     satellites,   # gps_satellites (unpacked)
                     sat_clamped,  # gps_satellites_clamped
