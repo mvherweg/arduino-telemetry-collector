@@ -427,38 +427,55 @@ void acquireGPSDataWithBudget(unsigned long time_budget_ms) {
 bool parseGPSData(String data) {
   if (data.startsWith("$GPGGA") || data.startsWith("$GNGGA")) {
     // Parse NMEA GGA sentence for position and satellite count
+    // Use direct char array access to avoid String operations
+    const char* nmea = data.c_str();
     int comma_positions[14];
     int comma_count = 0;
+    int len = data.length();
 
-    for (int i = 0; i < data.length() && comma_count < 14; i++) {
-      if (data.charAt(i) == ',') {
+    // Fast comma finding without charAt()
+    for (int i = 0; i < len && comma_count < 14; i++) {
+      if (nmea[i] == ',') {
         comma_positions[comma_count++] = i;
       }
     }
 
     if (comma_count >= 8) {
-      String lat_str = data.substring(comma_positions[1] + 1, comma_positions[2]);
-      String lon_str = data.substring(comma_positions[3] + 1, comma_positions[4]);
-      String fix_str = data.substring(comma_positions[5] + 1, comma_positions[6]);
-      String sat_str = data.substring(comma_positions[6] + 1, comma_positions[7]);
-      String hdop_str = data.substring(comma_positions[7] + 1, comma_positions[8]);
-
-      // Update satellite count (field 7 in GGA sentence)
-      if (sat_str.length() > 0) {
-        int sat_count = sat_str.toInt();
-        gps_satellites = (sat_count > 255) ? 255 : (uint8_t)sat_count;
-      }
-      
-      // Update HDOP (field 8 in GGA sentence)
-      if (hdop_str.length() > 0) {
-        gps_hdop = hdop_str.toFloat();
-      }
-
-      if (fix_str.toInt() > 0 && lat_str.length() > 0 && lon_str.length() > 0) {
-        latitude = convertNMEACoordinate(lat_str);
-        longitude = convertNMEACoordinate(lon_str);
-        gps_fix = true;
-        return true;
+      // Parse fix status first (fastest check)
+      int fix_start = comma_positions[5] + 1;
+      int fix_end = comma_positions[6];
+      if (fix_end > fix_start && nmea[fix_start] > '0') {
+        
+        // Parse satellite count directly from char array
+        int sat_start = comma_positions[6] + 1;
+        int sat_end = comma_positions[7];
+        if (sat_end > sat_start) {
+          int sat_count = 0;
+          for (int i = sat_start; i < sat_end; i++) {
+            if (nmea[i] >= '0' && nmea[i] <= '9') {
+              sat_count = sat_count * 10 + (nmea[i] - '0');
+            }
+          }
+          gps_satellites = (sat_count > 255) ? 255 : (uint8_t)sat_count;
+        }
+        
+        // Parse HDOP directly from char array
+        int hdop_start = comma_positions[7] + 1;
+        int hdop_end = comma_positions[8];
+        if (hdop_end > hdop_start) {
+          gps_hdop = atof(&nmea[hdop_start]);
+        }
+        
+        // Only create Strings for coordinate parsing (unavoidable due to convertNMEACoordinate)
+        String lat_str = data.substring(comma_positions[1] + 1, comma_positions[2]);
+        String lon_str = data.substring(comma_positions[3] + 1, comma_positions[4]);
+        
+        if (lat_str.length() > 0 && lon_str.length() > 0) {
+          latitude = convertNMEACoordinate(lat_str);
+          longitude = convertNMEACoordinate(lon_str);
+          gps_fix = true;
+          return true;
+        }
       }
     }
   }
@@ -577,18 +594,15 @@ void getCurrentTimestamp(uint16_t* days_since_1970, uint32_t* milliseconds_in_da
 }
 
 void writeDataToSD() {
-
+  // Generate filename once
   String filename = generateFilename();
   File data_file = SD.open(filename, FILE_WRITE);
   if (!data_file) return;  // Fail silently during runtime
 
-  // Write binary data
-  for (int i = 0; i < buffer_index; i++) {
-    data_file.write((uint8_t*)&data_buffer[i], sizeof(TelemetryData));
-  }
-
+  // Write entire buffer in one operation (much faster than loop)
+  data_file.write((uint8_t*)data_buffer, buffer_index * sizeof(TelemetryData));
+  
   data_file.close();
-
   buffer_index = 0; // Reset buffer
 }
 
@@ -596,19 +610,14 @@ String generateFilename() {
   // Reconstruct Unix timestamp from split format
   unsigned long unix_seconds = (data_buffer[0].days_since_1970 * 86400UL) + (data_buffer[0].milliseconds_in_day / 1000UL);
 
-  // Convert to 8-character hex format for alphabetical/chronological ordering
-  // Format: XXXXXXXX.ATC (exactly 8 hex chars + 3 char extension)
-  // Range: 00000000.ATC to FFFFFFFF.ATC (4.3 billion unique files, ~136 years)
-  String filename = "";
+  // Pre-allocate string to avoid reallocation during concatenation
+  String filename;
+  filename.reserve(12);  // 8 hex chars + ".ATC" = 12 characters
   
-  // Convert to uppercase hex with leading zeros
+  // Convert to uppercase hex with leading zeros (optimized)
+  const char hex_chars[] = "0123456789ABCDEF";
   for (int i = 7; i >= 0; i--) {
-    unsigned char hex_digit = (unix_seconds >> (i * 4)) & 0x0F;
-    if (hex_digit < 10) {
-      filename += (char)('0' + hex_digit);
-    } else {
-      filename += (char)('A' + hex_digit - 10);
-    }
+    filename += hex_chars[(unix_seconds >> (i * 4)) & 0x0F];
   }
   
   filename += ".ATC";
