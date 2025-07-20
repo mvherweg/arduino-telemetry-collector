@@ -8,7 +8,6 @@ const int YELLOW_LED = 2;
 const int WHITE_LED = 3;
 const int BLUE_LED = 4;
 const int GREEN_LED = 5;
-const int BUTTON_PIN = 6;
 const int RED_LED = 7;
 const int SD_CS_PIN = 53;
 
@@ -32,13 +31,10 @@ const unsigned int gps_fix_tries = 2;
 
 
 // State variables
-bool running = false;
 unsigned long iteration_counter = 0;
 unsigned long last_loop_time = 0;
 unsigned long gps_epoch_time = 0;  // Unix timestamp from GPS
 unsigned long gps_board_time = 0;  // millis() when GPS time was captured
-bool button_pressed = false;
-bool last_button_state = HIGH;
 
 // Loop timing monitoring
 uint8_t last_loop_skipped = 0;  // Iterations skipped in last loop timing violation
@@ -77,7 +73,6 @@ void setup() {
   pinMode(WHITE_LED, OUTPUT);
   pinMode(BLUE_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT);
   pinMode(RED_LED, OUTPUT);
 
   // Turn off all LEDs initially
@@ -94,47 +89,37 @@ void setup() {
 }
 
 void loop() {
-  if (running) {
-    unsigned long loop_start = millis();
+  unsigned long loop_start = millis();
 
-    // Check button press
-    checkButton();
-    if (!running) return; // Exit if stopped
+  // Iteration start
+  iteration_counter++;
+  turnOffLEDs();
 
-    // Iteration start
-    iteration_counter++;
-    turnOffLEDs();
+  // Location and time acquisition
+  if (iteration_counter % gps_interval == 0) {
+    unsigned long gps_start = millis();
+    unsigned long time_budget = loop_duration - (gps_start - loop_start);
 
-    // Location and time acquisition
-    if (iteration_counter % gps_interval == 0) {
-      unsigned long gps_start = millis();
-      unsigned long time_budget = loop_duration - (gps_start - loop_start);
-
-      acquireGPSDataWithBudget(time_budget);
-      digitalWrite(BLUE_LED, HIGH);
-    }
-
-    // Time tracking and LED updates
-    updateTimeAndLEDs();
-
-    // Telemetry collection
-    if (iteration_counter % telemetry_interval == 0) {
-      collectTelemetry();
-      digitalWrite(GREEN_LED, HIGH);
-    }
-
-    // Data writing
-    if (iteration_counter % write_interval == 0) {
-      writeDataToSD();
-    }
-
-    // Maintain timing
-    maintainLoopTiming(loop_start);
-  } else {
-    // Not running, just check button
-    checkButton();
-    delay(100); // Avoid busy waiting
+    acquireGPSDataWithBudget(time_budget);
+    digitalWrite(BLUE_LED, HIGH);
   }
+
+  // Time tracking and LED updates
+  updateTimeAndLEDs();
+
+  // Telemetry collection
+  if (iteration_counter % telemetry_interval == 0) {
+    collectTelemetry();
+    digitalWrite(GREEN_LED, HIGH);
+  }
+
+  // Data writing
+  if (iteration_counter % write_interval == 0) {
+    writeDataToSD();
+  }
+
+  // Maintain timing
+  maintainLoopTiming(loop_start);
 }
 
 void performSetup() {
@@ -198,7 +183,6 @@ void performSetup() {
     blinkError(1);
   }
 
-  running = true;
   iteration_counter = 0;
   last_loop_time = millis();
   Serial.println("Setup completed successfully. Starting main loop.");
@@ -645,33 +629,6 @@ String generateFilename() {
   return filename;
 }
 
-void checkButton() {
-  bool current_button_state = digitalRead(BUTTON_PIN);
-
-  if (current_button_state == LOW && last_button_state == HIGH) {
-    button_pressed = true;
-    delay(50); // Debounce
-  }
-
-  last_button_state = current_button_state;
-
-  if (button_pressed) {
-    button_pressed = false;
-
-    if (running) {
-      // Stop operation
-      if (iteration_counter % write_interval != 0) {
-        writeDataToSD(); // Write remaining data
-      }
-      running = false;
-      Serial.println("Stopped by button press");
-    } else {
-      // Start operation
-      Serial.println("Restarting by button press");
-      performSetup();
-    }
-  }
-}
 
 void updateTimeAndLEDs() {
   // Calculate current time for LED updates
