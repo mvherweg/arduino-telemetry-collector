@@ -34,27 +34,29 @@ All of it wired together on a breadboard.
 ### Pin Assignments
 
 **Arduino Mega 2560 Connections:**
+
 - **I2C Bus (MPU-6050):** SDA=Pin 20, SCL=Pin 21
 - **SPI Bus (SD Card):** MOSI=Pin 51, MISO=Pin 50, SCK=Pin 52, CS=Pin 53
 - **GPS Module:** RX1=Pin 19, TX1=Pin 18 (Serial1)
 - **Status LEDs:**
-  - Red LED: Pin 2
-  - Yellow LED: Pin 3
-  - White LED: Pin 4
-  - Blue LED: Pin 5
-  - Green LED: Pin 6
-- **Start/Stop Button:** Pin 7 (with internal pull-up)
+  - Yellow LED: Pin 2
+  - White LED: Pin 3
+  - Blue LED: Pin 4
+  - Green LED: Pin 5
+  - Red LED: Pin 7
+- **Start/Stop Button:** Pin 6 (with internal pull-up)
 
 ### Wiring Specifications
 
 - **LED Current Limiting:** 220Ω resistors for each LED (~20mA @ 5V)
 - **I2C Pull-ups:** 4.7kΩ resistors on SDA and SCL lines
-- **Button:** Connect between Pin 7 and GND (internal pull-up enabled)
+- **Button:** Connect between Pin 6 and GND (internal pull-up enabled)
 - **Power Supply:** USB-C connection (5V direct from car's USB-C port)
 
 ### Power Requirements
 
 **Component Power Consumption:**
+
 - Arduino Mega: 225mW
 - MPU-6050: 19.5mW
 - GPS Module: 335mW
@@ -71,16 +73,16 @@ All of it wired together on a breadboard.
     USB-C ──────►│VIN               GND├──── Common Ground
                  │                     │
     ┌────────────┤20(SDA)         53(CS)├─── SD Card Module
-    │    ┌───────┤21(SCL)         52(SCK)├─── SD Card Module  
+    │    ┌───────┤21(SCL)         52(SCK)├─── SD Card Module
     │    │   ┌───┤51(MOSI)       50(MISO)├─── SD Card Module
     │    │   │   │                     │
     │    │   │   ├19(RX1)         18(TX1)├─── GY-NEO6MV2 GPS
     │    │   │   │                     │
-    │    │   │   ├2               Pin 7├─── Start/Stop Button ──┤
+    │    │   │   ├2               Pin 6├─── Start/Stop Button ──┤
     │    │   │   ├3                    │                      GND
     │    │   │   ├4                    │
     │    │   │   ├5                    │
-    │    │   │   ├6                5V├──── +5V Power Rail
+    │    │   │   ├7                5V├──── +5V Power Rail
     │    │   │   └─────────────────────┘
     │    │   │
     │    │   └─── SD Card Module (SPI)
@@ -106,11 +108,11 @@ All of it wired together on a breadboard.
              └─────────────┘
 
  Status LEDs (with 220Ω resistors):
- Pin 2 ──[220Ω]──►|── Red LED ──── GND
- Pin 3 ──[220Ω]──►|── Yellow LED ─ GND  
- Pin 4 ──[220Ω]──►|── White LED ── GND
- Pin 5 ──[220Ω]──►|── Blue LED ─── GND
- Pin 6 ──[220Ω]──►|── Green LED ── GND
+ Pin 2 ──[220Ω]──►|── Yellow LED ─ GND
+ Pin 3 ──[220Ω]──►|── White LED ── GND
+ Pin 4 ──[220Ω]──►|── Blue LED ─── GND
+ Pin 5 ──[220Ω]──►|── Green LED ── GND
+ Pin 7 ──[220Ω]──►|── Red LED ──── GND
 
  I2C Pull-ups:
  +5V ──[4.7kΩ]── SDA (Pin 20)
@@ -242,13 +244,15 @@ When the state is not `running` (i.e., `running` had the false value) and the bu
 The Arduino Mega has 8KB SRAM total. The data buffer must fit within available memory after accounting for program variables and stack space.
 
 **Data Structure per Sample:**
+
 - Telemetry data: 6 float values (3-axis accelerometer + 3-axis gyroscope) = 24 bytes
-- GPS data: latitude, longitude, altitude = 12 bytes  
+- GPS data: latitude, longitude, altitude = 12 bytes
 - Timestamp: epoch seconds = 4 bytes
 - Per-iteration overhead: ~4 bytes
 
 **Buffer Size Calculation:**
 With default settings (write_interval=300):
+
 - Buffer for 300 iterations × 24 bytes = 7.2KB telemetry data
 - Plus GPS data: 3 samples × 12 bytes = 36 bytes
 - Plus timestamps and overhead: ~100 bytes
@@ -258,9 +262,10 @@ With default settings (write_interval=300):
 
 **File Size Estimates:**
 With default configuration:
+
 - Per file (every 3 seconds): ~7.3KB
 - Per minute: ~146KB (20 files)
-- Per hour: ~8.8MB  
+- Per hour: ~8.8MB
 - Per day: ~211MB
 - Recommended SD card: 8GB+ for several weeks of data
 
@@ -269,11 +274,13 @@ With default configuration:
 ## Environmental Considerations
 
 **Operating Temperature:**
+
 - Arduino Mega specification: -40°C to +85°C
 - Automotive cabin environment: typically -30°C to +70°C
 - **Assessment:** Compatible with automotive use when mounted away from direct engine heat
 
 **Vibration and Shock:**
+
 - Breadboard construction is not ideal for automotive environment
 - Recommend securing components and adding shock absorption
 - Consider migration to PCB for production use
@@ -282,11 +289,13 @@ With default configuration:
 
 **MPU-6050 Sensor Orientation:**
 The accelerometer and gyroscope report data in a standard 3-axis coordinate system:
+
 - **X-axis:** Typically forward/backward relative to device orientation
-- **Y-axis:** Typically left/right relative to device orientation  
+- **Y-axis:** Typically left/right relative to device orientation
 - **Z-axis:** Typically up/down relative to device orientation
 
 **Installation Notes:**
+
 - Document the physical mounting orientation of the MPU-6050 in the vehicle
 - Data will be reported as measured; no automatic orientation correction
 - For consistent results, maintain same mounting orientation across installations
