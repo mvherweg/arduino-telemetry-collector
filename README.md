@@ -7,7 +7,7 @@ Arduino setup gathering telemetry and location whilst active, writing it to an S
 To be installed in a car to gather telemetry about its location and the road it is driving on.  
 This data is periodically written to an SD card.
 
-## Phyiscal Setup
+## Physical Setup
 
 ### Components
 
@@ -22,7 +22,7 @@ Consists of:
 
 Further extended with Leds for informational use:
 
-- Green led: blink on every read cycle finished of the Accelerometer and Magnetometer. After both finished, not for each separately.
+- Green led: blink on every read cycle finished of the Accelerometer and the Gyroscope. After all finished, not for each separately.
 - Blue led: blink on every read cycle finished of the GPS.
 - White led: blinks at start of every new minute. Based on wall-clock time.
 - Yellow led: blinks at start of every new second. Based on wall-clock time.
@@ -31,9 +31,94 @@ Further extended with Leds for informational use:
 Finally, there is a simple button that enables stop-start.
 All of it wired together on a breadboard.
 
-### Diagram
+### Pin Assignments
 
-TODO
+**Arduino Mega 2560 Connections:**
+- **I2C Bus (MPU-6050):** SDA=Pin 20, SCL=Pin 21
+- **SPI Bus (SD Card):** MOSI=Pin 51, MISO=Pin 50, SCK=Pin 52, CS=Pin 53
+- **GPS Module:** RX1=Pin 19, TX1=Pin 18 (Serial1)
+- **Status LEDs:**
+  - Red LED: Pin 2
+  - Yellow LED: Pin 3
+  - White LED: Pin 4
+  - Blue LED: Pin 5
+  - Green LED: Pin 6
+- **Start/Stop Button:** Pin 7 (with internal pull-up)
+
+### Wiring Specifications
+
+- **LED Current Limiting:** 220Ω resistors for each LED (~20mA @ 5V)
+- **I2C Pull-ups:** 4.7kΩ resistors on SDA and SCL lines
+- **Button:** Connect between Pin 7 and GND (internal pull-up enabled)
+- **Power Supply:** USB-C connection (5V direct from car's USB-C port)
+
+### Power Requirements
+
+**Component Power Consumption:**
+- Arduino Mega: 225mW
+- MPU-6050: 19.5mW
+- GPS Module: 335mW
+- SD Card: 125mW average, 500mW peak during writes
+- LEDs: 100mW total when active
+- **Total System:** 600mW average, 800mW peak
+- **From USB-C Supply:** 600-800mW (no regulator losses needed)
+
+### Physical Wiring Diagram
+
+```
+                    Arduino Mega 2560
+                 ┌─────────────────────┐
+    USB-C ──────►│VIN               GND├──── Common Ground
+                 │                     │
+    ┌────────────┤20(SDA)         53(CS)├─── SD Card Module
+    │    ┌───────┤21(SCL)         52(SCK)├─── SD Card Module  
+    │    │   ┌───┤51(MOSI)       50(MISO)├─── SD Card Module
+    │    │   │   │                     │
+    │    │   │   ├19(RX1)         18(TX1)├─── GY-NEO6MV2 GPS
+    │    │   │   │                     │
+    │    │   │   ├2               Pin 7├─── Start/Stop Button ──┤
+    │    │   │   ├3                    │                      GND
+    │    │   │   ├4                    │
+    │    │   │   ├5                    │
+    │    │   │   ├6                5V├──── +5V Power Rail
+    │    │   │   └─────────────────────┘
+    │    │   │
+    │    │   └─── SD Card Module (SPI)
+    │    │         ┌─────────────┐
+    │    │         │  VCC    GND │
+    │    │         │  MOSI   MISO│
+    │    │         │  SCK    CS  │
+    │    │         └─────────────┘
+    │    │
+    │    └───── MPU-6050 (I2C)
+    │            ┌─────────────┐
+    │            │ VCC     INT │
+    │            │ GND     AD0 │
+    │            │ SCL     XCL │
+    │            │ SDA     XDA │
+    │            └─────────────┘
+    │
+    └─────── GY-NEO6MV2 GPS
+             ┌─────────────┐
+             │ VCC     PPS │
+             │ RX      GND │
+             │ TX          │
+             └─────────────┘
+
+ Status LEDs (with 220Ω resistors):
+ Pin 2 ──[220Ω]──►|── Red LED ──── GND
+ Pin 3 ──[220Ω]──►|── Yellow LED ─ GND  
+ Pin 4 ──[220Ω]──►|── White LED ── GND
+ Pin 5 ──[220Ω]──►|── Blue LED ─── GND
+ Pin 6 ──[220Ω]──►|── Green LED ── GND
+
+ I2C Pull-ups:
+ +5V ──[4.7kΩ]── SDA (Pin 20)
+ +5V ──[4.7kΩ]── SCL (Pin 21)
+
+ Power Supply:
+ USB-C ──────────────── 5V ──[Common Rail]── All Components
+```
 
 ## Behavior
 
@@ -84,7 +169,7 @@ It then reads the file back in to verify the writing was successful.
 ### Loop
 
 The loop handles one or multiple tasks, depending on the iteration.
-Every iteration start-to-end must finish within `loop_duration` milliseconds (default: 100).
+Every iteration start-to-end must finish within `loop_duration` milliseconds (default: 10).
 If it finishes faster, the program will wait at the end of the loop to ensure it took `loop_duration` milliseconds before the next loop iteration starts.  
 If it finishes too late, sufficient iterations will be skipped to catch up with expected timing. These skips mean that no loop tasks are performed. Only the iteration counter is incremented. This will permit us to see afterwards in the data that iterations were skipped.
 
@@ -103,12 +188,10 @@ The loop tasks when the state is `running` are, in order:
 
 #### Tasks: location acquisition
 
-Every `gps_interval` iterations:
+Every `gps_interval` iterations (default: 100):
 
 - The GPS location will be acquired and stored in the data buffer.
 - Turns on the blue led for this iteration.
-
-On other iterations, it will store zeros for these data points in the data buffer.
 
 #### Tasks: time acquisition
 
@@ -125,14 +208,14 @@ If the iteration before **did** finish within `loop_duration` milliseconds, the 
 
 #### Tasks: telemetry collection
 
-Every `telemtry_interval` iterations:
+Every `telemetry_interval` iterations (default: 1):
 
 - All accelerometer and gyroscope values are collected and stored in the data buffer.
 - Turns on the green led.
 
 #### Tasks: data writing
 
-Every `write_interval` iterations, the data buffer is written to the SD card.
+Every `write_interval` iterations (default: 300), the data buffer is written to the SD card.
 The filename format is: `<write_prefix>_yyyy-mm-dd_hhmmssSSS.atc` where the datetime with millisecond precision is UTC-based and constructed based on the oldest time in the data buffer.  
 The data is in a binary format to keep the writing operation as simple as possible and thus as fast as possible. For reading the data out, see the [data parser](#data-parser).
 
@@ -155,11 +238,63 @@ When the state is not `running` (i.e., `running` had the false value) and the bu
 
 ## Data Buffer
 
-The data buffer is memory space set aside to accumulate the data being gathered until it is written to the SD card.
+**Memory Constraints:**
+The Arduino Mega has 8KB SRAM total. The data buffer must fit within available memory after accounting for program variables and stack space.
+
+**Data Structure per Sample:**
+- Telemetry data: 6 float values (3-axis accelerometer + 3-axis gyroscope) = 24 bytes
+- GPS data: latitude, longitude, altitude = 12 bytes  
+- Timestamp: epoch seconds = 4 bytes
+- Per-iteration overhead: ~4 bytes
+
+**Buffer Size Calculation:**
+With default settings (write_interval=300):
+- Buffer for 300 iterations × 24 bytes = 7.2KB telemetry data
+- Plus GPS data: 3 samples × 12 bytes = 36 bytes
+- Plus timestamps and overhead: ~100 bytes
+- **Total buffer requirement: ~7.3KB**
+
+**Maximum Supported write_interval:** Approximately 330 iterations (limited by available SRAM)
+
+**File Size Estimates:**
+With default configuration:
+- Per file (every 3 seconds): ~7.3KB
+- Per minute: ~146KB (20 files)
+- Per hour: ~8.8MB  
+- Per day: ~211MB
+- Recommended SD card: 8GB+ for several weeks of data
 
 ## Data Parser
 
-The `parse-telemetry.py` script is a pure Python script that can read the written binary files and conver them into CSVs with a header.
+## Environmental Considerations
+
+**Operating Temperature:**
+- Arduino Mega specification: -40°C to +85°C
+- Automotive cabin environment: typically -30°C to +70°C
+- **Assessment:** Compatible with automotive use when mounted away from direct engine heat
+
+**Vibration and Shock:**
+- Breadboard construction is not ideal for automotive environment
+- Recommend securing components and adding shock absorption
+- Consider migration to PCB for production use
+
+**Coordinate System**
+
+**MPU-6050 Sensor Orientation:**
+The accelerometer and gyroscope report data in a standard 3-axis coordinate system:
+- **X-axis:** Typically forward/backward relative to device orientation
+- **Y-axis:** Typically left/right relative to device orientation  
+- **Z-axis:** Typically up/down relative to device orientation
+
+**Installation Notes:**
+- Document the physical mounting orientation of the MPU-6050 in the vehicle
+- Data will be reported as measured; no automatic orientation correction
+- For consistent results, maintain same mounting orientation across installations
+- Consider adding calibration routine to establish baseline orientation
+
+## Data Parser
+
+The `parse-telemetry.py` script is a pure Python script that can read the written binary files and convert them into CSVs with a header.
 It takes 2 positional arguments:
 
 - `source`: Where to read from. Mandatory.
