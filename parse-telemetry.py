@@ -72,8 +72,8 @@ def unpack_gps_status(packed_uint16):
     satellites_raw = (packed_uint16 >> 6) & 0x1F  # 5 bits  
     skipped_raw = (packed_uint16 >> 11) & 0x1F  # 5 bits
     
-    # Convert to physical units
-    gps_accuracy = accuracy_raw / 10.0  # HDOP value
+    # Convert to physical units  
+    gps_accuracy = accuracy_raw  # HDOP value as integer
     gps_satellites = satellites_raw
     iterations_skipped = skipped_raw
     

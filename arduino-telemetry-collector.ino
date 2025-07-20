@@ -792,8 +792,8 @@ uint16_t packGPSStatus(bool has_gps, float hdop, uint8_t satellites, unsigned lo
     packed |= 0x0001;
   }
   
-  // Bits 1-5: GPS accuracy (HDOP * 10, clamped to 0-31)
-  uint8_t accuracy = (uint8_t)(hdop * 10.0);
+  // Bits 1-5: GPS accuracy (HDOP as integer, clamped to 0-31)
+  uint8_t accuracy = (uint8_t)hdop;  // Integer precision only
   if (accuracy > 31) accuracy = 31;
   packed |= (accuracy & 0x1F) << 1;
   
