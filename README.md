@@ -14,8 +14,7 @@ This data is periodically written to an SD card.
 Consists of:
 
 - Compute unit: Arduino Mega board
-- Accelerometer: MPU-6050
-- Gyroscope: MPU-6050 (same unit as above)
+- Accelerometer/Gyroscope/Temperature: MPU-6500 (upgrade from MPU-6050)
 - Magnetometer: missing, future work
 - GPS: GY-NEO6MV2
 - Storage: micro SD card adapter
@@ -237,13 +236,18 @@ If the iteration before **did** finish within `loop_duration` milliseconds, the 
 
 Every `telemetry_interval` iterations (default: 1):
 
-- All accelerometer and gyroscope values are collected and stored in the data buffer.
+- All accelerometer, gyroscope, and temperature values are collected from MPU-6500
+- Values are compressed to 16-bit integers for efficient storage:
+  - Accelerometer: ±3.2768g range with 0.0001g precision
+  - Gyroscope: ±250°/s range with 0.0076°/s precision  
+  - Temperature: -40°C to +85°C range with 0.002°C precision
+- Data is stored in the compressed data buffer
 - Turns on the green led.
 
 #### Tasks: data writing
 
-Every `write_interval` iterations (default: 300), the data buffer is written to the SD card.
-The filename format is: `<write_prefix>_yyyy-mm-dd_hhmmssSSS.atc` where the datetime with millisecond precision is UTC-based and constructed based on the oldest time in the data buffer.  
+Every `write_interval` iterations (current: 10), the data buffer is written to the SD card.
+The filename format is: `XXXXXXXX.ATC` where XXXXXXXX represents the last 8 digits of the Unix epoch timestamp for 8.3 filename compatibility.
 The data is in a binary format to keep the writing operation as simple as possible and thus as fast as possible. For reading the data out, see the [data parser](#data-parser).
 
 ### Start-stop button
@@ -268,31 +272,32 @@ When the state is not `running` (i.e., `running` had the false value) and the bu
 **Memory Constraints:**
 The Arduino Mega has 8KB SRAM total. The data buffer must fit within available memory after accounting for program variables and stack space.
 
-**Data Structure per Sample:**
+**Data Structure per Sample (16-bit Compressed):**
 
-- Telemetry data: 6 float values (3-axis accelerometer + 3-axis gyroscope) = 24 bytes
-- GPS data: latitude, longitude, altitude = 12 bytes
+- Raw sensor data: 6 int16 values (3-axis accelerometer + 3-axis gyroscope) = 12 bytes
+- Temperature: 1 int16 value = 2 bytes
+- GPS data: latitude, longitude, altitude = 12 bytes (float precision maintained)
 - Timestamp: epoch seconds = 4 bytes
-- Per-iteration overhead: ~4 bytes
+- GPS validity flag: 1 byte
+- Padding: 2 bytes for alignment
+- **Total per sample: 33 bytes (26.7% reduction)**
 
 **Buffer Size Calculation:**
-With default settings (write_interval=300):
+With current settings (write_interval=10):
 
-- Buffer for 300 iterations × 24 bytes = 7.2KB telemetry data
-- Plus GPS data: 3 samples × 12 bytes = 36 bytes
-- Plus timestamps and overhead: ~100 bytes
-- **Total buffer requirement: ~7.3KB**
+- Buffer for 10 iterations × 33 bytes = 330 bytes total
+- **Current buffer requirement: ~0.33KB**
 
-**Maximum Supported write_interval:** Approximately 330 iterations (limited by available SRAM)
+**Maximum Supported write_interval:** Approximately 242 iterations (8KB SRAM ÷ 33 bytes per sample)
 
 **File Size Estimates:**
-With default configuration:
+With current configuration (write_interval=10, loop_duration=100ms):
 
-- Per file (every 3 seconds): ~7.3KB
-- Per minute: ~146KB (20 files)
-- Per hour: ~8.8MB
-- Per day: ~211MB
-- Recommended SD card: 8GB+ for several weeks of data
+- Per file (every 1 second): ~0.33KB
+- Per minute: ~20KB (60 files)
+- Per hour: ~1.2MB
+- Per day: ~29MB
+- Recommended SD card: 2GB+ for several weeks of data
 
 ## Data Parser
 

@@ -12,7 +12,7 @@ const int BUTTON_PIN = 6;
 const int RED_LED = 7;
 const int SD_CS_PIN = 53;
 
-// MPU-6050 I2C address
+// MPU-6500 I2C address (same as MPU-6050)
 const int MPU_ADDR = 0x68;
 
 // GPS Serial (using Serial1 on Mega)
@@ -45,17 +45,20 @@ float longitude = 0.0;
 float altitude = 0.0;
 bool gps_fix = false;
 
-// MPU-6050 variables
+// MPU-6500 variables
 float accel_x, accel_y, accel_z;
 float gyro_x, gyro_y, gyro_z;
+float temperature;
 
-// Data buffer structure
+// Compressed data buffer structure (33 bytes vs 45 bytes)
 struct TelemetryData {
-  unsigned long timestamp;
-  float accel_x, accel_y, accel_z;
-  float gyro_x, gyro_y, gyro_z;
-  float latitude, longitude, altitude;
-  bool has_gps_data;
+  unsigned long timestamp;           // 4 bytes
+  int16_t accel_x, accel_y, accel_z;  // 6 bytes (16-bit compressed)
+  int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)
+  int16_t temperature;               // 2 bytes (16-bit compressed)
+  float latitude, longitude, altitude; // 12 bytes (keep float for GPS precision)
+  bool has_gps_data;                 // 1 byte
+  uint8_t padding[2];                // 2 bytes padding for alignment
 };
 
 TelemetryData* data_buffer;
@@ -226,6 +229,24 @@ bool initializeMPU6050() {
   Wire.endTransmission(true);
   delay(100);
 
+  // Configure sample rate (optional - default is fine for now)
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x19); // SMPLRT_DIV register
+  Wire.write(0x07); // Sample rate = 1kHz / (1 + 7) = 125Hz
+  Wire.endTransmission(true);
+
+  // Configure accelerometer range (optional - ±2g default)
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1C); // ACCEL_CONFIG register
+  Wire.write(0x00); // ±2g range
+  Wire.endTransmission(true);
+
+  // Configure gyroscope range (optional - ±250°/s default)
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1B); // GYRO_CONFIG register
+  Wire.write(0x00); // ±250°/s range
+  Wire.endTransmission(true);
+
   // Test read
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x75); // WHO_AM_I register
@@ -236,6 +257,8 @@ bool initializeMPU6050() {
     uint8_t who_am_i = Wire.read();
     if (who_am_i == 0x68 || who_am_i == 0x70 || who_am_i == 0x71) {
       Serial.println("MPU sensor initialized successfully");
+      Serial.print("WHO_AM_I: 0x");
+      Serial.println(who_am_i, HEX);
       return true;
     }
   }
@@ -369,6 +392,14 @@ void collectTelemetry() {
   int16_t ay = Wire.read() << 8 | Wire.read();
   int16_t az = Wire.read() << 8 | Wire.read();
 
+  // Read temperature data
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x41); // TEMP_OUT_H
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 2, true);
+
+  int16_t temp_raw = Wire.read() << 8 | Wire.read();
+
   // Read gyroscope data
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x43); // GYRO_XOUT_H
@@ -384,23 +415,28 @@ void collectTelemetry() {
   accel_y = ay / 16384.0;
   accel_z = az / 16384.0;
 
+  temperature = (temp_raw / 340.0) + 36.53; // Convert to Celsius
+
   gyro_x = gx / 131.0; // ±250°/s range
   gyro_y = gy / 131.0;
   gyro_z = gz / 131.0;
 
-  // Store in buffer
+  // Store in buffer with 16-bit compression
   if (buffer_index < write_interval) {
     data_buffer[buffer_index].timestamp = getCurrentEpochTime();
-    data_buffer[buffer_index].accel_x = accel_x;
-    data_buffer[buffer_index].accel_y = accel_y;
-    data_buffer[buffer_index].accel_z = accel_z;
-    data_buffer[buffer_index].gyro_x = gyro_x;
-    data_buffer[buffer_index].gyro_y = gyro_y;
-    data_buffer[buffer_index].gyro_z = gyro_z;
+    data_buffer[buffer_index].accel_x = encodeAccel(accel_x);
+    data_buffer[buffer_index].accel_y = encodeAccel(accel_y);
+    data_buffer[buffer_index].accel_z = encodeAccel(accel_z);
+    data_buffer[buffer_index].gyro_x = encodeGyro(gyro_x);
+    data_buffer[buffer_index].gyro_y = encodeGyro(gyro_y);
+    data_buffer[buffer_index].gyro_z = encodeGyro(gyro_z);
+    data_buffer[buffer_index].temperature = encodeTemperature(temperature);
     data_buffer[buffer_index].latitude = latitude;
     data_buffer[buffer_index].longitude = longitude;
     data_buffer[buffer_index].altitude = altitude;
     data_buffer[buffer_index].has_gps_data = (iteration_counter % gps_interval == 0);
+    data_buffer[buffer_index].padding[0] = 0;  // Initialize padding
+    data_buffer[buffer_index].padding[1] = 0;
 
     buffer_index++;
   }
@@ -736,6 +772,32 @@ void maintainLoopTiming(unsigned long loop_start) {
   }
 
   last_loop_time = millis();
+}
+
+
+// 16-bit encoding functions for sensor data compression
+int16_t encodeAccel(float accel_g) {
+  // Scale: ±3.2768g range with 0.0001g precision
+  float scaled = accel_g * 10000.0;
+  if (scaled > 32767.0) scaled = 32767.0;
+  if (scaled < -32768.0) scaled = -32768.0;
+  return (int16_t)scaled;
+}
+
+int16_t encodeGyro(float gyro_deg_s) {
+  // Scale: ±250°/s range with 0.0076°/s precision
+  float scaled = gyro_deg_s * 131.0;
+  if (scaled > 32767.0) scaled = 32767.0;
+  if (scaled < -32768.0) scaled = -32768.0;
+  return (int16_t)scaled;
+}
+
+int16_t encodeTemperature(float temp_c) {
+  // Scale: -40°C to +85°C range with 0.002°C precision
+  float scaled = (temp_c + 50.0) * 512.0;
+  if (scaled > 32767.0) scaled = 32767.0;
+  if (scaled < -32768.0) scaled = -32768.0;
+  return (int16_t)scaled;
 }
 
 void blinkError(int blink_count) {

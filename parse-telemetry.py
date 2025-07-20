@@ -19,25 +19,41 @@ import struct
 import csv
 from pathlib import Path
 
-# Data structure matching Arduino TelemetryData struct with padding
+# Data structure matching Arduino compressed TelemetryData struct
 # struct TelemetryData {
-#   unsigned long timestamp;     // 4 bytes
-#   float accel_x, accel_y, accel_z;  // 12 bytes
-#   float gyro_x, gyro_y, gyro_z;     // 12 bytes  
-#   float latitude, longitude, altitude; // 12 bytes
-#   bool has_gps_data;           // 1 byte + 3 bytes padding = 4 bytes
-# } = 32 bytes total (with Arduino struct padding)
+#   unsigned long timestamp;           // 4 bytes
+#   int16_t accel_x, accel_y, accel_z;  // 6 bytes (16-bit compressed)
+#   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)
+#   int16_t temperature;               // 2 bytes (16-bit compressed)
+#   float latitude, longitude, altitude; // 12 bytes (keep float for GPS precision)
+#   bool has_gps_data;                 // 1 byte
+#   uint8_t padding[2];                // 2 bytes padding for alignment
+# } = 33 bytes total
 
-TELEMETRY_STRUCT_FORMAT = '<Lfffffffff?'  # Little endian: unsigned long + 9 floats + bool
+TELEMETRY_STRUCT_FORMAT = '<Lhhhhhhhfff?BB'  # Little endian: ulong + 7×int16 + 3×float + bool + 2×uint8
 TELEMETRY_STRUCT_SIZE = struct.calcsize(TELEMETRY_STRUCT_FORMAT)
 
 CSV_HEADERS = [
     'timestamp',
     'accel_x', 'accel_y', 'accel_z',
-    'gyro_x', 'gyro_y', 'gyro_z', 
+    'gyro_x', 'gyro_y', 'gyro_z',
+    'temperature',
     'latitude', 'longitude', 'altitude',
     'has_gps_data'
 ]
+
+# Decoding functions for 16-bit compressed sensor data
+def decode_accel(int16_val):
+    """Convert 16-bit accelerometer value back to g-force."""
+    return int16_val / 10000.0
+
+def decode_gyro(int16_val):
+    """Convert 16-bit gyroscope value back to degrees/second."""
+    return int16_val / 131.0
+
+def decode_temperature(int16_val):
+    """Convert 16-bit temperature value back to Celsius."""
+    return (int16_val / 512.0) - 50.0
 
 def parse_telemetry_file(input_file_path, output_file_path):
     """Parse a single binary telemetry file and convert to CSV."""
@@ -70,7 +86,25 @@ def parse_telemetry_file(input_file_path, output_file_path):
             
             try:
                 unpacked = struct.unpack(TELEMETRY_STRUCT_FORMAT, record_data)
-                records.append(unpacked)
+                
+                # Decode compressed values back to physical units
+                # unpacked = (timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, temp, lat, lon, alt, has_gps, pad1, pad2)
+                decoded_record = (
+                    unpacked[0],  # timestamp (unchanged)
+                    decode_accel(unpacked[1]),  # accel_x
+                    decode_accel(unpacked[2]),  # accel_y  
+                    decode_accel(unpacked[3]),  # accel_z
+                    decode_gyro(unpacked[4]),   # gyro_x
+                    decode_gyro(unpacked[5]),   # gyro_y
+                    decode_gyro(unpacked[6]),   # gyro_z
+                    decode_temperature(unpacked[7]),  # temperature
+                    unpacked[8],  # latitude (unchanged)
+                    unpacked[9],  # longitude (unchanged)
+                    unpacked[10], # altitude (unchanged)
+                    unpacked[11]  # has_gps_data (unchanged)
+                    # Skip padding bytes
+                )
+                records.append(decoded_record)
             except struct.error as e:
                 print(f"Error unpacking record {i} in {input_file_path}: {e}")
                 continue
