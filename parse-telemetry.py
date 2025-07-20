@@ -19,16 +19,16 @@ import struct
 import csv
 from pathlib import Path
 
-# Data structure matching Arduino TelemetryData struct
+# Data structure matching Arduino TelemetryData struct with padding
 # struct TelemetryData {
 #   unsigned long timestamp;     // 4 bytes
 #   float accel_x, accel_y, accel_z;  // 12 bytes
 #   float gyro_x, gyro_y, gyro_z;     // 12 bytes  
 #   float latitude, longitude, altitude; // 12 bytes
-#   bool has_gps_data;           // 1 byte
-# } = 41 bytes total
+#   bool has_gps_data;           // 1 byte + 3 bytes padding = 4 bytes
+# } = 32 bytes total (with Arduino struct padding)
 
-TELEMETRY_STRUCT_FORMAT = '<Lffffffb'  # Little endian: unsigned long + 6 floats + bool
+TELEMETRY_STRUCT_FORMAT = '<Lfffffffff?'  # Little endian: unsigned long + 9 floats + bool
 TELEMETRY_STRUCT_SIZE = struct.calcsize(TELEMETRY_STRUCT_FORMAT)
 
 CSV_HEADERS = [
