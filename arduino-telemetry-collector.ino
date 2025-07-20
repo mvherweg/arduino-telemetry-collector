@@ -25,7 +25,7 @@ unsigned long blink_pause_duration = 2000;
 unsigned long loop_duration = 100;
 unsigned int telemetry_interval = 1;
 unsigned int gps_interval = 10;
-unsigned int write_interval = 300;
+unsigned int write_interval = 10;
 String write_prefix = "ATC_BMW";
 
 // State variables
