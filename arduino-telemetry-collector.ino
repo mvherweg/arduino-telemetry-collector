@@ -19,16 +19,16 @@ const int MPU_ADDR = 0x68;
 #define GPS_SERIAL Serial1
 
 // Configuration parameters
-unsigned long blink_on_duration = 500;
-unsigned long blink_off_duration = 500;
-unsigned long blink_pause_duration = 2000;
-unsigned long loop_duration = 100;
-unsigned int telemetry_interval = 1;
-unsigned int gps_interval = 10;
-unsigned int write_interval = 10;
-String write_prefix = "ATC_BMW";
-unsigned long gps_fix_duration = 30000;
-unsigned int gps_fix_tries = 2;
+const unsigned int blink_on_duration = 500;
+const unsigned int blink_off_duration = 500;
+const unsigned int blink_pause_duration = 2000;
+const unsigned int loop_duration = 100;
+const unsigned int telemetry_interval = 1;
+const unsigned int gps_interval = 10;
+const unsigned int write_interval = 146;  // SD card block optimization: 146 records × 28 bytes = 4,088 bytes ≈ 4KB block size
+const char write_prefix[] = "ATC_BMW";
+const unsigned int gps_fix_duration = 30000;
+const unsigned int gps_fix_tries = 2;
 
 
 // State variables
@@ -40,9 +40,8 @@ unsigned long gps_board_time = 0;  // millis() when GPS time was captured
 bool button_pressed = false;
 bool last_button_state = HIGH;
 
-// Loop timing monitoring  
-unsigned long total_iterations_skipped = 0;
-unsigned long last_skipped_count = 0;
+// Loop timing monitoring
+uint8_t last_loop_skipped = 0;  // Iterations skipped in last loop timing violation
 
 // GPS variables
 float latitude = 0.0;
@@ -216,7 +215,7 @@ bool validateConfiguration() {
   if ((gps_interval * loop_duration) < 200) return false;
   if (write_interval < 1) return false;
   if (write_interval < gps_interval) return false;
-  if (write_prefix.length() < 1 || write_prefix.length() > 8) return false;
+  if (strlen(write_prefix) < 1 || strlen(write_prefix) > 8) return false;
   if (gps_fix_duration < 5000) return false; // Minimum 5 seconds
   // gps_fix_tries can be any value (0 = infinite)
 
@@ -419,9 +418,9 @@ void collectTelemetry() {
 
   // Store in buffer with 16-bit compression
   if (buffer_index < write_interval) {
-    // Calculate iterations skipped delta since last record
-    unsigned long skipped_delta = total_iterations_skipped - last_skipped_count;
-    last_skipped_count = total_iterations_skipped;
+    // Use skipped count from last loop timing check
+    uint8_t skipped_delta = last_loop_skipped;
+    last_loop_skipped = 0;  // Reset for next iteration
 
     // Get current timestamp with 1ms precision
     getCurrentTimestamp(&data_buffer[buffer_index].days_since_1970, &data_buffer[buffer_index].milliseconds_in_day);
@@ -700,7 +699,10 @@ void checkButton() {
 }
 
 void updateTimeAndLEDs() {
-  unsigned long current_time = getCurrentEpochTime();
+  // Calculate current time for LED updates
+  unsigned long current_board_time = millis();
+  unsigned long elapsed_since_gps = current_board_time - gps_board_time;
+  unsigned long current_time = gps_epoch_time + (elapsed_since_gps / 1000);
   static unsigned long last_minute = 0;
   static unsigned long last_second = 0;
 
@@ -746,11 +748,13 @@ void maintainLoopTiming(unsigned long loop_start) {
     // Skip iterations to catch up
     unsigned long iterations_to_skip = loop_time / loop_duration;
     iteration_counter += iterations_to_skip;
+    
+    // Store for next telemetry collection (clamp to uint8_t range)
+    last_loop_skipped = (iterations_to_skip > 255) ? 255 : (uint8_t)iterations_to_skip;
+    
     Serial.print("Loop timing violation! Skipped ");
     Serial.print(iterations_to_skip);
-    Serial.print(" iterations (total violations: ");
-    Serial.print(total_iterations_skipped);
-    Serial.println(")");
+    Serial.println(" iterations");
   }
 
   last_loop_time = millis();
