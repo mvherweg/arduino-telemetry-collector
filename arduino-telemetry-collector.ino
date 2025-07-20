@@ -39,26 +39,32 @@ unsigned long gps_board_time = 0;
 bool button_pressed = false;
 bool last_button_state = HIGH;
 
+// Loop timing monitoring  
+unsigned long total_iterations_skipped = 0;
+unsigned long last_skipped_count = 0;
+
 // GPS variables
 float latitude = 0.0;
 float longitude = 0.0;
 float altitude = 0.0;
 bool gps_fix = false;
+uint8_t gps_satellites = 0;
+float gps_hdop = 99.9; // Horizontal dilution of precision
 
 // MPU-6500 variables
 float accel_x, accel_y, accel_z;
 float gyro_x, gyro_y, gyro_z;
 float temperature;
 
-// Compressed data buffer structure (33 bytes vs 45 bytes)
+// Compressed data buffer structure (32 bytes vs 45 bytes)
 struct TelemetryData {
   unsigned long timestamp;           // 4 bytes
   int16_t accel_x, accel_y, accel_z;  // 6 bytes (16-bit compressed)
   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)
   int16_t temperature;               // 2 bytes (16-bit compressed)
   float latitude, longitude, altitude; // 12 bytes (keep float for GPS precision)
-  bool has_gps_data;                 // 1 byte
-  uint8_t padding[2];                // 2 bytes padding for alignment
+  uint16_t gps_status_packed;        // 2 bytes (bit-packed GPS/timing data)
+  // Bit layout: [15:11]=iterations_skipped, [10:6]=satellites, [5:1]=accuracy, [0]=has_gps
 };
 
 TelemetryData* data_buffer;
@@ -105,7 +111,7 @@ void loop() {
     if (iteration_counter % gps_interval == 0) {
       unsigned long gps_start = millis();
       unsigned long time_budget = loop_duration - (gps_start - loop_start);
-      
+
       acquireGPSDataWithBudget(time_budget);
       digitalWrite(BLUE_LED, HIGH);
     }
@@ -178,7 +184,7 @@ void performSetup() {
     }
     blinkError(4);
   }
-  
+
   if (!gps_fix_acquired) {
     Serial.println("GPS fix acquisition failed after all attempts - continuing without location");
     gps_fix = false;
@@ -290,13 +296,13 @@ bool acquireGPSFix() {
     if (GPS_SERIAL.available()) {
       String gps_data = GPS_SERIAL.readStringUntil('\n');
       sentences_received++;
-      
+
       // Only show first few sentences for debugging
       if (sentences_received <= 3) {
         Serial.print("GPS data: ");
         Serial.println(gps_data);
       }
-      
+
       if (parseGPSData(gps_data)) {
         if (gps_fix) {
           Serial.println("GPS fix acquired");
@@ -363,7 +369,7 @@ bool testSDWrite() {
 
   String read_data = test_file.readString();
   test_file.close();
-  
+
   Serial.print("Read back data: '");
   Serial.print(read_data);
   Serial.println("'");
@@ -423,6 +429,10 @@ void collectTelemetry() {
 
   // Store in buffer with 16-bit compression
   if (buffer_index < write_interval) {
+    // Calculate iterations skipped delta since last record
+    unsigned long skipped_delta = total_iterations_skipped - last_skipped_count;
+    last_skipped_count = total_iterations_skipped;
+
     data_buffer[buffer_index].timestamp = getCurrentEpochTime();
     data_buffer[buffer_index].accel_x = encodeAccel(accel_x);
     data_buffer[buffer_index].accel_y = encodeAccel(accel_y);
@@ -434,9 +444,9 @@ void collectTelemetry() {
     data_buffer[buffer_index].latitude = latitude;
     data_buffer[buffer_index].longitude = longitude;
     data_buffer[buffer_index].altitude = altitude;
-    data_buffer[buffer_index].has_gps_data = (iteration_counter % gps_interval == 0);
-    data_buffer[buffer_index].padding[0] = 0;  // Initialize padding
-    data_buffer[buffer_index].padding[1] = 0;
+    // Pack GPS status with bit manipulation
+    bool has_gps = (iteration_counter % gps_interval == 0);
+    data_buffer[buffer_index].gps_status_packed = packGPSStatus(has_gps, gps_hdop, gps_satellites, skipped_delta);
 
     buffer_index++;
   }
@@ -452,7 +462,7 @@ void acquireGPSData() {
 
 void acquireGPSDataWithBudget(unsigned long time_budget_ms) {
   unsigned long start_time = millis();
-  
+
   // If we don't have a GPS fix, try to acquire one within time budget
   if (!gps_fix && time_budget_ms > 50) { // Need at least 50ms to try
     while (millis() - start_time < time_budget_ms) {
@@ -460,7 +470,7 @@ void acquireGPSDataWithBudget(unsigned long time_budget_ms) {
         String gps_data = GPS_SERIAL.readStringUntil('\n');
         parseGPSData(gps_data);
         parseGPSTime(gps_data);
-        
+
         if (gps_fix) {
           break; // Got fix, stop trying
         }
@@ -475,7 +485,7 @@ void acquireGPSDataWithBudget(unsigned long time_budget_ms) {
 
 bool parseGPSData(String data) {
   if (data.startsWith("$GPGGA") || data.startsWith("$GNGGA")) {
-    // Parse NMEA GGA sentence for position
+    // Parse NMEA GGA sentence for position and satellite count
     int comma_positions[14];
     int comma_count = 0;
 
@@ -485,11 +495,24 @@ bool parseGPSData(String data) {
       }
     }
 
-    if (comma_count >= 6) {
+    if (comma_count >= 8) {
       String lat_str = data.substring(comma_positions[1] + 1, comma_positions[2]);
       String lon_str = data.substring(comma_positions[3] + 1, comma_positions[4]);
-      String alt_str = data.substring(comma_positions[8] + 1, comma_positions[9]);
       String fix_str = data.substring(comma_positions[5] + 1, comma_positions[6]);
+      String sat_str = data.substring(comma_positions[6] + 1, comma_positions[7]);
+      String hdop_str = data.substring(comma_positions[7] + 1, comma_positions[8]);
+      String alt_str = data.substring(comma_positions[8] + 1, comma_positions[9]);
+
+      // Update satellite count (field 7 in GGA sentence)
+      if (sat_str.length() > 0) {
+        int sat_count = sat_str.toInt();
+        gps_satellites = (sat_count > 255) ? 255 : (uint8_t)sat_count;
+      }
+      
+      // Update HDOP (field 8 in GGA sentence)
+      if (hdop_str.length() > 0) {
+        gps_hdop = hdop_str.toFloat();
+      }
 
       if (fix_str.toInt() > 0 && lat_str.length() > 0 && lon_str.length() > 0) {
         latitude = convertNMEACoordinate(lat_str);
@@ -531,15 +554,15 @@ bool parseGPSTime(String data) {
 
 float convertNMEACoordinate(String coord) {
   if (coord.length() < 7) return 0.0; // Minimum: DDMM.MM
-  
+
   // NMEA format: DDMM.MMMM or DDDMM.MMMM
   // Find decimal point
   int decimal_pos = coord.indexOf('.');
   if (decimal_pos < 3) return 0.0; // Invalid format
-  
+
   // Extract degrees (everything except last 2 digits before decimal)
   float degrees = coord.substring(0, decimal_pos - 2).toFloat();
-  
+
   // Extract minutes (last 2 digits before decimal + decimal part)
   float minutes = coord.substring(decimal_pos - 2).toFloat();
 
@@ -549,21 +572,21 @@ float convertNMEACoordinate(String coord) {
 unsigned long convertGPSTimeToEpoch(String time_str, String date_str) {
   // Parse HHMMSS.SS format (e.g., "172741.00")
   if (time_str.length() < 6) return 0;
-  
+
   int hours = time_str.substring(0, 2).toInt();
-  int minutes = time_str.substring(2, 4).toInt();  
+  int minutes = time_str.substring(2, 4).toInt();
   int seconds = time_str.substring(4, 6).toInt();
-  
+
   // Parse DDMMYY format (e.g., "200725" = July 25, 2020)
   if (date_str.length() < 6) return 0;
-  
+
   int day = date_str.substring(0, 2).toInt();
   int month = date_str.substring(2, 4).toInt();
   int year = 2000 + date_str.substring(4, 6).toInt(); // Y2K handling for 2000-2099
-  
+
   // Calculate days since Unix epoch (Jan 1, 1970)
   unsigned long days = 0;
-  
+
   // Add days for complete years
   for (int y = 1970; y < year; y++) {
     if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
@@ -572,29 +595,29 @@ unsigned long convertGPSTimeToEpoch(String time_str, String date_str) {
       days += 365;
     }
   }
-  
+
   // Days in each month (non-leap year)
   int monthDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-  
+
   // Adjust February for leap year
   if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
     monthDays[1] = 29;
   }
-  
+
   // Add days for complete months in current year
   for (int m = 1; m < month; m++) {
     days += monthDays[m - 1];
   }
-  
+
   // Add remaining days
   days += day - 1; // Subtract 1 because day 1 = 0 days elapsed
-  
+
   // Convert to seconds and add time
   unsigned long epoch = days * 86400UL; // 24 * 60 * 60
   epoch += hours * 3600UL;
   epoch += minutes * 60UL;
   epoch += seconds;
-  
+
   return epoch;
 }
 
@@ -608,47 +631,7 @@ void writeDataToSD() {
   if (buffer_index == 0) return;
 
   String filename = generateFilename();
-  Serial.print("Attempting to create file: ");
-  Serial.println(filename);
-  Serial.print("Filename length: ");
-  Serial.println(filename.length());
-  
-  // Check if SD card is still accessible
-  File root = SD.open("/");
-  if (!root) {
-    Serial.println("SD card no longer accessible!");
-    return;
-  }
-  
-  // List existing files
-  Serial.println("Files on SD card:");
-  while (true) {
-    File entry = root.openNextFile();
-    if (!entry) break;
-    Serial.print("  ");
-    Serial.print(entry.name());
-    Serial.print(" (");
-    Serial.print(entry.size());
-    Serial.println(" bytes)");
-    entry.close();
-  }
-  root.close();
-  
-  // Try creating with simpler filename first
-  Serial.println("Testing simple filename...");
-  File test_file = SD.open("test.txt", FILE_WRITE);
-  if (test_file) {
-    test_file.println("test");
-    test_file.close();
-    Serial.println("Simple filename works - removing test file");
-    SD.remove("test.txt");
-  } else {
-    Serial.println("Even simple filename fails!");
-    return;
-  }
-  
   File data_file = SD.open(filename, FILE_WRITE);
-
   if (!data_file) {
     Serial.print("Failed to open file: ");
     Serial.println(filename);
@@ -663,22 +646,17 @@ void writeDataToSD() {
 
   data_file.close();
 
-  Serial.print("Wrote ");
-  Serial.print(buffer_index);
-  Serial.print(" records to ");
-  Serial.println(filename);
-
   buffer_index = 0; // Reset buffer
 }
 
 String generateFilename() {
   unsigned long oldest_time = data_buffer[0].timestamp;
-  
+
   // Use last 8 digits of epoch for strict 8.3 format
   // Format: XXXXXXXX.ATC (exactly 8 chars + 3 char extension)
   String timestamp_str = String(oldest_time);
   String filename;
-  
+
   if (timestamp_str.length() >= 8) {
     // Take last 8 digits
     filename = timestamp_str.substring(timestamp_str.length() - 8) + ".ATC";
@@ -690,7 +668,7 @@ String generateFilename() {
     }
     filename += ".ATC";
   }
-  
+
   return filename;
 }
 
@@ -763,12 +741,17 @@ void maintainLoopTiming(unsigned long loop_start) {
   if (loop_time < loop_duration) {
     delay(loop_duration - loop_time);
   } else if (loop_time > loop_duration) {
+    // Count timing violations
+    // (tracking iterations skipped instead of violations)
+
     // Skip iterations to catch up
     unsigned long iterations_to_skip = loop_time / loop_duration;
     iteration_counter += iterations_to_skip;
-    Serial.print("Skipped ");
+    Serial.print("Loop timing violation! Skipped ");
     Serial.print(iterations_to_skip);
-    Serial.println(" iterations");
+    Serial.print(" iterations (total violations: ");
+    Serial.print(total_iterations_skipped);
+    Serial.println(")");
   }
 
   last_loop_time = millis();
@@ -798,6 +781,33 @@ int16_t encodeTemperature(float temp_c) {
   if (scaled > 32767.0) scaled = 32767.0;
   if (scaled < -32768.0) scaled = -32768.0;
   return (int16_t)scaled;
+}
+
+// Bit packing function for GPS status
+uint16_t packGPSStatus(bool has_gps, float hdop, uint8_t satellites, unsigned long iterations_skipped) {
+  uint16_t packed = 0;
+  
+  // Bit 0: has_gps_data
+  if (has_gps) {
+    packed |= 0x0001;
+  }
+  
+  // Bits 1-5: GPS accuracy (HDOP * 10, clamped to 0-31)
+  uint8_t accuracy = (uint8_t)(hdop * 10.0);
+  if (accuracy > 31) accuracy = 31;
+  packed |= (accuracy & 0x1F) << 1;
+  
+  // Bits 6-10: GPS satellites (clamped to 0-31)
+  uint8_t sats = satellites;
+  if (sats > 31) sats = 31;
+  packed |= (sats & 0x1F) << 6;
+  
+  // Bits 11-15: iterations skipped (clamped to 0-31)
+  uint8_t skipped = (uint8_t)iterations_skipped;
+  if (skipped > 31) skipped = 31;
+  packed |= (skipped & 0x1F) << 11;
+  
+  return packed;
 }
 
 void blinkError(int blink_count) {

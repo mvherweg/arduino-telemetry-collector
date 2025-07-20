@@ -23,14 +23,13 @@ from pathlib import Path
 # struct TelemetryData {
 #   unsigned long timestamp;           // 4 bytes
 #   int16_t accel_x, accel_y, accel_z;  // 6 bytes (16-bit compressed)
-#   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)
+#   int16_t gyro_x, gyro_y, gyro_z;     // 6 bytes (16-bit compressed)  
 #   int16_t temperature;               // 2 bytes (16-bit compressed)
 #   float latitude, longitude, altitude; // 12 bytes (keep float for GPS precision)
-#   bool has_gps_data;                 // 1 byte
-#   uint8_t padding[2];                // 2 bytes padding for alignment
-# } = 33 bytes total
+#   uint16_t gps_status_packed;        // 2 bytes (bit-packed GPS/timing data)
+# } = 32 bytes total
 
-TELEMETRY_STRUCT_FORMAT = '<Lhhhhhhhfff?BB'  # Little endian: ulong + 7×int16 + 3×float + bool + 2×uint8
+TELEMETRY_STRUCT_FORMAT = '<LhhhhhhhfffH'  # Little endian: ulong + 7×int16 + 3×float + uint16
 TELEMETRY_STRUCT_SIZE = struct.calcsize(TELEMETRY_STRUCT_FORMAT)
 
 CSV_HEADERS = [
@@ -39,7 +38,13 @@ CSV_HEADERS = [
     'gyro_x', 'gyro_y', 'gyro_z',
     'temperature',
     'latitude', 'longitude', 'altitude',
-    'has_gps_data'
+    'has_gps_data',
+    'gps_satellites',
+    'gps_satellites_clamped',
+    'gps_accuracy',
+    'gps_accuracy_clamped', 
+    'iterations_skipped',
+    'iterations_skipped_clamped'
 ]
 
 # Decoding functions for 16-bit compressed sensor data
@@ -54,6 +59,31 @@ def decode_gyro(int16_val):
 def decode_temperature(int16_val):
     """Convert 16-bit temperature value back to Celsius."""
     return (int16_val / 512.0) - 50.0
+
+def unpack_gps_status(packed_uint16):
+    """Unpack GPS status from 16-bit packed value.
+    
+    Bit layout: [15:11]=iterations_skipped, [10:6]=satellites, [5:1]=accuracy, [0]=has_gps
+    Returns: (has_gps, accuracy, satellites, iterations_skipped, accuracy_clamped, satellites_clamped, skipped_clamped)
+    """
+    # Extract bit fields
+    has_gps = bool(packed_uint16 & 0x0001)
+    accuracy_raw = (packed_uint16 >> 1) & 0x1F  # 5 bits
+    satellites_raw = (packed_uint16 >> 6) & 0x1F  # 5 bits  
+    skipped_raw = (packed_uint16 >> 11) & 0x1F  # 5 bits
+    
+    # Convert to physical units
+    gps_accuracy = accuracy_raw / 10.0  # HDOP value
+    gps_satellites = satellites_raw
+    iterations_skipped = skipped_raw
+    
+    # Check for clamping (max values indicate clamped data)
+    accuracy_clamped = (accuracy_raw == 31)
+    satellites_clamped = (satellites_raw == 31)
+    skipped_clamped = (skipped_raw == 31)
+    
+    return (has_gps, gps_accuracy, gps_satellites, iterations_skipped, 
+            accuracy_clamped, satellites_clamped, skipped_clamped)
 
 def parse_telemetry_file(input_file_path, output_file_path):
     """Parse a single binary telemetry file and convert to CSV."""
@@ -88,7 +118,12 @@ def parse_telemetry_file(input_file_path, output_file_path):
                 unpacked = struct.unpack(TELEMETRY_STRUCT_FORMAT, record_data)
                 
                 # Decode compressed values back to physical units
-                # unpacked = (timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, temp, lat, lon, alt, has_gps, pad1, pad2)
+                # unpacked = (timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, temp, lat, lon, alt, gps_status_packed)
+                
+                # Unpack GPS status bits
+                gps_status = unpack_gps_status(unpacked[11])
+                has_gps, accuracy, satellites, skipped, acc_clamped, sat_clamped, skip_clamped = gps_status
+                
                 decoded_record = (
                     unpacked[0],  # timestamp (unchanged)
                     decode_accel(unpacked[1]),  # accel_x
@@ -101,8 +136,13 @@ def parse_telemetry_file(input_file_path, output_file_path):
                     unpacked[8],  # latitude (unchanged)
                     unpacked[9],  # longitude (unchanged)
                     unpacked[10], # altitude (unchanged)
-                    unpacked[11]  # has_gps_data (unchanged)
-                    # Skip padding bytes
+                    has_gps,      # has_gps_data (unpacked)
+                    satellites,   # gps_satellites (unpacked)
+                    sat_clamped,  # gps_satellites_clamped
+                    accuracy,     # gps_accuracy (HDOP)
+                    acc_clamped,  # gps_accuracy_clamped
+                    skipped,      # iterations_skipped
+                    skip_clamped  # iterations_skipped_clamped
                 )
                 records.append(decoded_record)
             except struct.error as e:
