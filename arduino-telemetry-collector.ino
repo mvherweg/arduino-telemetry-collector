@@ -4,11 +4,7 @@
 #include <SoftwareSerial.h>
 
 // Pin definitions
-const int YELLOW_LED = 2;
-const int WHITE_LED = 3;
-const int BLUE_LED = 4;
-const int GREEN_LED = 5;
-const int RED_LED = 7;
+const int RED_LED = 7;  // Error indication only
 const int SD_CS_PIN = 53;
 
 // MPU-6500 I2C address (same as MPU-6050)
@@ -69,17 +65,7 @@ void setup() {
   GPS_SERIAL.begin(9600);
 
   // Initialize pins
-  pinMode(YELLOW_LED, OUTPUT);
-  pinMode(WHITE_LED, OUTPUT);
-  pinMode(BLUE_LED, OUTPUT);
-  pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
-
-  // Turn off all LEDs initially
-  digitalWrite(YELLOW_LED, LOW);
-  digitalWrite(WHITE_LED, LOW);
-  digitalWrite(BLUE_LED, LOW);
-  digitalWrite(GREEN_LED, LOW);
   digitalWrite(RED_LED, LOW);
 
   Serial.println("Arduino Telemetry Collector Starting...");
@@ -93,7 +79,6 @@ void loop() {
 
   // Iteration start
   iteration_counter++;
-  turnOffLEDs();
 
   // Location and time acquisition
   if (iteration_counter % gps_interval == 0) {
@@ -101,16 +86,11 @@ void loop() {
     unsigned long time_budget = loop_duration - (gps_start - loop_start);
 
     acquireGPSDataWithBudget(time_budget);
-    digitalWrite(BLUE_LED, HIGH);
   }
-
-  // Time tracking and LED updates
-  updateTimeAndLEDs();
 
   // Telemetry collection
   if (iteration_counter % telemetry_interval == 0) {
     collectTelemetry();
-    digitalWrite(GREEN_LED, HIGH);
   }
 
   // Data writing
@@ -630,42 +610,7 @@ String generateFilename() {
 }
 
 
-void updateTimeAndLEDs() {
-  // Calculate current time for LED updates
-  unsigned long current_board_time = millis();
-  unsigned long elapsed_since_gps = current_board_time - gps_board_time;
-  unsigned long current_time = gps_epoch_time + (elapsed_since_gps / 1000);
-  static unsigned long last_minute = 0;
-  static unsigned long last_second = 0;
 
-  // Check for new minute
-  if (current_time / 60 != last_minute / 60) {
-    digitalWrite(WHITE_LED, HIGH);
-    last_minute = current_time;
-  }
-
-  // Check for new second
-  if (current_time != last_second) {
-    digitalWrite(YELLOW_LED, HIGH);
-    last_second = current_time;
-  }
-
-  // Check loop timing
-  unsigned long current_loop_time = millis();
-  if (current_loop_time - last_loop_time > loop_duration) {
-    digitalWrite(RED_LED, HIGH);
-  } else {
-    digitalWrite(RED_LED, LOW);
-  }
-}
-
-void turnOffLEDs() {
-  digitalWrite(YELLOW_LED, LOW);
-  digitalWrite(WHITE_LED, LOW);
-  digitalWrite(BLUE_LED, LOW);
-  digitalWrite(GREEN_LED, LOW);
-  // Note: Red LED is controlled by timing logic
-}
 
 void maintainLoopTiming(unsigned long loop_start) {
   unsigned long loop_end = millis();
