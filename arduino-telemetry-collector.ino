@@ -27,6 +27,8 @@ unsigned int telemetry_interval = 1;
 unsigned int gps_interval = 10;
 unsigned int write_interval = 10;
 String write_prefix = "ATC_BMW";
+unsigned long gps_fix_duration = 30000;
+unsigned int gps_fix_tries = 2;
 
 // State variables
 bool running = false;
@@ -68,7 +70,7 @@ void setup() {
   pinMode(WHITE_LED, OUTPUT);
   pinMode(BLUE_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_PIN, INPUT);
   pinMode(RED_LED, OUTPUT);
 
   // Turn off all LEDs initially
@@ -98,7 +100,10 @@ void loop() {
 
     // Location and time acquisition
     if (iteration_counter % gps_interval == 0) {
-      acquireGPSData();
+      unsigned long gps_start = millis();
+      unsigned long time_budget = loop_duration - (gps_start - loop_start);
+      
+      acquireGPSDataWithBudget(time_budget);
       digitalWrite(BLUE_LED, HIGH);
     }
 
@@ -126,56 +131,64 @@ void loop() {
 }
 
 void performSetup() {
-  bool setup_success = false;
+  // Step 1: Configuration validation
+  while (!validateConfiguration()) {
+    blinkError(5);
+  }
 
-  while (!setup_success) {
-    // Step 1: Configuration validation
-    if (!validateConfiguration()) {
-      blinkError(5);
-      continue;
-    }
-
-    // Allocate data buffer
+  // Allocate data buffer (only once)
+  if (data_buffer != NULL) {
+    free(data_buffer); // Free existing buffer if any
+  }
+  data_buffer = (TelemetryData*)malloc(write_interval * sizeof(TelemetryData));
+  while (data_buffer == NULL) {
+    Serial.println("Failed to allocate data buffer");
+    blinkError(5);
     data_buffer = (TelemetryData*)malloc(write_interval * sizeof(TelemetryData));
-    if (data_buffer == NULL) {
-      Serial.println("Failed to allocate data buffer");
-      blinkError(5);
-      continue;
-    }
-    buffer_index = 0;
+  }
+  buffer_index = 0;
 
-    // Step 2: Initialize I2C and MPU-6050
-    Wire.begin();
-    if (!initializeMPU6050()) {
-      blinkError(2);
-      continue;
-    }
+  // Step 2: Initialize I2C and MPU sensor (only once)
+  Wire.begin();
+  while (!initializeMPU6050()) {
+    blinkError(2);
+  }
 
-    // Step 3: Initialize SD card
-    if (!initializeSD()) {
-      blinkError(1);
-      continue;
-    }
+  // Step 3: Initialize SD card (only once)
+  while (!initializeSD()) {
+    blinkError(1);
+  }
 
-    // Step 4: Acquire GPS fix
-    if (!acquireGPSFix()) {
-      blinkError(4);
-      continue;
+  // Step 4: Acquire GPS fix (with timeout and retry limits)
+  bool gps_fix_acquired = false;
+  for (unsigned int attempt = 0; attempt < gps_fix_tries || gps_fix_tries == 0; attempt++) {
+    if (acquireGPSFix()) {
+      gps_fix_acquired = true;
+      break;
     }
-
-    // Step 5: Acquire time
-    if (!acquireTime()) {
-      blinkError(3);
-      continue;
+    if (gps_fix_tries > 0) {
+      Serial.print("GPS fix attempt ");
+      Serial.print(attempt + 1);
+      Serial.print(" of ");
+      Serial.print(gps_fix_tries);
+      Serial.println(" failed");
     }
+    blinkError(4);
+  }
+  
+  if (!gps_fix_acquired) {
+    Serial.println("GPS fix acquisition failed after all attempts - continuing without location");
+    gps_fix = false;
+  }
 
-    // Test SD card write
-    if (!testSDWrite()) {
-      blinkError(1);
-      continue;
-    }
+  // Step 5: Acquire time (retry until success)
+  while (!acquireTime()) {
+    blinkError(3);
+  }
 
-    setup_success = true;
+  // Test SD card write (retry until success)
+  while (!testSDWrite()) {
+    blinkError(1);
   }
 
   running = true;
@@ -196,15 +209,17 @@ bool validateConfiguration() {
   if (write_interval < 1) return false;
   if (write_interval < gps_interval) return false;
   if (write_prefix.length() < 1 || write_prefix.length() > 8) return false;
+  if (gps_fix_duration < 5000) return false; // Minimum 5 seconds
+  // gps_fix_tries can be any value (0 = infinite)
 
   Serial.println("Configuration validation passed");
   return true;
 }
 
 bool initializeMPU6050() {
-  Serial.println("Initializing MPU-6050...");
+  Serial.println("Initializing MPU sensor...");
 
-  // Wake up MPU-6050
+  // Wake up MPU sensor
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x6B); // PWR_MGMT_1 register
   Wire.write(0);    // Wake up
@@ -219,13 +234,13 @@ bool initializeMPU6050() {
 
   if (Wire.available()) {
     uint8_t who_am_i = Wire.read();
-    if (who_am_i == 0x68) {
-      Serial.println("MPU-6050 initialized successfully");
+    if (who_am_i == 0x68 || who_am_i == 0x70 || who_am_i == 0x71) {
+      Serial.println("MPU sensor initialized successfully");
       return true;
     }
   }
 
-  Serial.println("MPU-6050 initialization failed");
+  Serial.println("MPU sensor initialization failed");
   return false;
 }
 
@@ -242,12 +257,23 @@ bool initializeSD() {
 }
 
 bool acquireGPSFix() {
-  Serial.println("Acquiring GPS fix...");
+  Serial.print("Acquiring GPS fix (timeout: ");
+  Serial.print(gps_fix_duration / 1000);
+  Serial.println(" seconds)...");
   unsigned long start_time = millis();
+  int sentences_received = 0;
 
-  while (millis() - start_time < 60000) { // 60 second timeout
+  while (millis() - start_time < gps_fix_duration) {
     if (GPS_SERIAL.available()) {
       String gps_data = GPS_SERIAL.readStringUntil('\n');
+      sentences_received++;
+      
+      // Only show first few sentences for debugging
+      if (sentences_received <= 3) {
+        Serial.print("GPS data: ");
+        Serial.println(gps_data);
+      }
+      
       if (parseGPSData(gps_data)) {
         if (gps_fix) {
           Serial.println("GPS fix acquired");
@@ -258,7 +284,9 @@ bool acquireGPSFix() {
     delay(100);
   }
 
-  Serial.println("GPS fix acquisition failed");
+  Serial.print("GPS fix acquisition failed (received ");
+  Serial.print(sentences_received);
+  Serial.println(" NMEA sentences)");
   return false;
 }
 
@@ -285,15 +313,23 @@ bool acquireTime() {
 
 bool testSDWrite() {
   Serial.println("Testing SD card write...");
+  Serial.print("Writing timestamp: ");
+  Serial.println(gps_epoch_time);
 
+  // Remove existing file and create new one
+  if (SD.exists("setup.txt")) {
+    SD.remove("setup.txt");
+  }
   File test_file = SD.open("setup.txt", FILE_WRITE);
   if (!test_file) {
     Serial.println("Failed to open setup.txt for writing");
+    Serial.println("Possible causes: SD card not inserted, bad connections, incompatible card");
     return false;
   }
 
   test_file.println(gps_epoch_time);
   test_file.close();
+  Serial.println("Write operation completed");
 
   // Read back to verify
   test_file = SD.open("setup.txt", FILE_READ);
@@ -304,13 +340,21 @@ bool testSDWrite() {
 
   String read_data = test_file.readString();
   test_file.close();
+  
+  Serial.print("Read back data: '");
+  Serial.print(read_data);
+  Serial.println("'");
+  Serial.print("Expected: ");
+  Serial.println(gps_epoch_time);
 
+  // Trim whitespace for comparison
+  read_data.trim();
   if (read_data.toInt() == gps_epoch_time) {
     Serial.println("SD card write test passed");
     return true;
   }
 
-  Serial.println("SD card write test failed");
+  Serial.println("SD card write test failed - data mismatch");
   return false;
 }
 
@@ -367,6 +411,29 @@ void acquireGPSData() {
     String gps_data = GPS_SERIAL.readStringUntil('\n');
     parseGPSData(gps_data);
     parseGPSTime(gps_data);
+  }
+}
+
+void acquireGPSDataWithBudget(unsigned long time_budget_ms) {
+  unsigned long start_time = millis();
+  
+  // If we don't have a GPS fix, try to acquire one within time budget
+  if (!gps_fix && time_budget_ms > 50) { // Need at least 50ms to try
+    while (millis() - start_time < time_budget_ms) {
+      if (GPS_SERIAL.available()) {
+        String gps_data = GPS_SERIAL.readStringUntil('\n');
+        parseGPSData(gps_data);
+        parseGPSTime(gps_data);
+        
+        if (gps_fix) {
+          break; // Got fix, stop trying
+        }
+      }
+      delay(10); // Small delay to avoid busy waiting
+    }
+  } else {
+    // Already have fix or no time budget, just update normally
+    acquireGPSData();
   }
 }
 
@@ -427,18 +494,72 @@ bool parseGPSTime(String data) {
 }
 
 float convertNMEACoordinate(String coord) {
-  if (coord.length() < 4) return 0.0;
-
-  float degrees = coord.substring(0, coord.indexOf('.') - 2).toFloat();
-  float minutes = coord.substring(coord.indexOf('.') - 2).toFloat();
+  if (coord.length() < 7) return 0.0; // Minimum: DDMM.MM
+  
+  // NMEA format: DDMM.MMMM or DDDMM.MMMM
+  // Find decimal point
+  int decimal_pos = coord.indexOf('.');
+  if (decimal_pos < 3) return 0.0; // Invalid format
+  
+  // Extract degrees (everything except last 2 digits before decimal)
+  float degrees = coord.substring(0, decimal_pos - 2).toFloat();
+  
+  // Extract minutes (last 2 digits before decimal + decimal part)
+  float minutes = coord.substring(decimal_pos - 2).toFloat();
 
   return degrees + minutes / 60.0;
 }
 
 unsigned long convertGPSTimeToEpoch(String time_str, String date_str) {
-  // Simplified conversion - would need proper date/time library for accuracy
-  // For now, return a placeholder
-  return 1600000000; // Placeholder epoch time
+  // Parse HHMMSS.SS format (e.g., "172741.00")
+  if (time_str.length() < 6) return 0;
+  
+  int hours = time_str.substring(0, 2).toInt();
+  int minutes = time_str.substring(2, 4).toInt();  
+  int seconds = time_str.substring(4, 6).toInt();
+  
+  // Parse DDMMYY format (e.g., "200725" = July 25, 2020)
+  if (date_str.length() < 6) return 0;
+  
+  int day = date_str.substring(0, 2).toInt();
+  int month = date_str.substring(2, 4).toInt();
+  int year = 2000 + date_str.substring(4, 6).toInt(); // Y2K handling for 2000-2099
+  
+  // Calculate days since Unix epoch (Jan 1, 1970)
+  unsigned long days = 0;
+  
+  // Add days for complete years
+  for (int y = 1970; y < year; y++) {
+    if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
+      days += 366; // Leap year
+    } else {
+      days += 365;
+    }
+  }
+  
+  // Days in each month (non-leap year)
+  int monthDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  
+  // Adjust February for leap year
+  if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
+    monthDays[1] = 29;
+  }
+  
+  // Add days for complete months in current year
+  for (int m = 1; m < month; m++) {
+    days += monthDays[m - 1];
+  }
+  
+  // Add remaining days
+  days += day - 1; // Subtract 1 because day 1 = 0 days elapsed
+  
+  // Convert to seconds and add time
+  unsigned long epoch = days * 86400UL; // 24 * 60 * 60
+  epoch += hours * 3600UL;
+  epoch += minutes * 60UL;
+  epoch += seconds;
+  
+  return epoch;
 }
 
 unsigned long getCurrentEpochTime() {
@@ -451,11 +572,51 @@ void writeDataToSD() {
   if (buffer_index == 0) return;
 
   String filename = generateFilename();
+  Serial.print("Attempting to create file: ");
+  Serial.println(filename);
+  Serial.print("Filename length: ");
+  Serial.println(filename.length());
+  
+  // Check if SD card is still accessible
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println("SD card no longer accessible!");
+    return;
+  }
+  
+  // List existing files
+  Serial.println("Files on SD card:");
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    Serial.print("  ");
+    Serial.print(entry.name());
+    Serial.print(" (");
+    Serial.print(entry.size());
+    Serial.println(" bytes)");
+    entry.close();
+  }
+  root.close();
+  
+  // Try creating with simpler filename first
+  Serial.println("Testing simple filename...");
+  File test_file = SD.open("test.txt", FILE_WRITE);
+  if (test_file) {
+    test_file.println("test");
+    test_file.close();
+    Serial.println("Simple filename works - removing test file");
+    SD.remove("test.txt");
+  } else {
+    Serial.println("Even simple filename fails!");
+    return;
+  }
+  
   File data_file = SD.open(filename, FILE_WRITE);
 
   if (!data_file) {
     Serial.print("Failed to open file: ");
     Serial.println(filename);
+    Serial.println("Possible causes: filename too long, SD card full, or corrupted");
     return;
   }
 
@@ -476,10 +637,24 @@ void writeDataToSD() {
 
 String generateFilename() {
   unsigned long oldest_time = data_buffer[0].timestamp;
-
-  // Convert to date/time format (simplified)
-  // Would need proper date/time library for accurate conversion
-  String filename = write_prefix + "_2024-01-01_120000000.atc";
+  
+  // Use last 8 digits of epoch for strict 8.3 format
+  // Format: XXXXXXXX.ATC (exactly 8 chars + 3 char extension)
+  String timestamp_str = String(oldest_time);
+  String filename;
+  
+  if (timestamp_str.length() >= 8) {
+    // Take last 8 digits
+    filename = timestamp_str.substring(timestamp_str.length() - 8) + ".ATC";
+  } else {
+    // Pad with zeros if needed
+    filename = timestamp_str;
+    while (filename.length() < 8) {
+      filename = "0" + filename;
+    }
+    filename += ".ATC";
+  }
+  
   return filename;
 }
 

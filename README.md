@@ -50,7 +50,7 @@ All of it wired together on a breadboard.
 
 - **LED Current Limiting:** 220Ω resistors for each LED (~20mA @ 5V)
 - **I2C Pull-ups:** 4.7kΩ resistors on SDA and SCL lines
-- **Button:** Connect between Pin 6 and GND (internal pull-up enabled)
+- **Button:** Connect between Pin 6 and GND, with 10kΩ pull-up resistor from Pin 6 to 5V
 - **Power Supply:** USB-C connection (5V direct from car's USB-C port)
 
 ### Power Requirements
@@ -78,9 +78,9 @@ All of it wired together on a breadboard.
     │    │   │   │                     │
     │    │   │   ├19(RX1)         18(TX1)├─── GY-NEO6MV2 GPS
     │    │   │   │                     │
-    │    │   │   ├2               Pin 6├─── Start/Stop Button ──┤
-    │    │   │   ├3                    │                      GND
-    │    │   │   ├4                    │
+    │    │   │   ├2               Pin 6├─┬─ Start/Stop Button ──┤
+    │    │   │   ├3                    │ │                      GND
+    │    │   │   ├4                    │ └─[10kΩ]── +5V
     │    │   │   ├5                    │
     │    │   │   ├7                5V├──── +5V Power Rail
     │    │   │   └─────────────────────┘
@@ -118,6 +118,9 @@ All of it wired together on a breadboard.
  +5V ──[4.7kΩ]── SDA (Pin 20)
  +5V ──[4.7kΩ]── SCL (Pin 21)
 
+ Button Pull-up:
+ +5V ──[10kΩ]─── Pin 6 ──[Button]── GND
+
  Power Supply:
  USB-C ──────────────── 5V ──[Common Rail]── All Components
 ```
@@ -150,18 +153,40 @@ Checks whether the set configuration is valid. Checks these parameters:
 - `gps_interval`: Must be at least 1. Must be equal or larger than `telemetry_interval`. `gps_interval` times `loop_duration` must be at least 200.
 - `write_interval`: Must be at least 1. Must be equal or larger than `gps_interval`.
 - `write_prefix`: Must be at least 1 and at most 8 ASCII characters.
+- `gps_fix_duration`: Must be at least 5000 milliseconds. Duration to wait for GPS location fix in each attempt.
+- `gps_fix_tries`: Number of GPS fix attempts during setup. 0 means retry indefinitely (original behavior).
 
 Also establishes our data collection buffer and allocates sufficient space for it. See the [data buffer](#data-buffer) section.
 
 #### Acquire GPS fix
 
-Acquire initial coordinates. In case of a cold start, may take some time.
+Attempts to acquire initial GPS coordinates with configurable timeout and retry behavior:
+
+- **Location fix attempts**: Up to `gps_fix_tries` attempts (0 = infinite retries)
+- **Per-attempt timeout**: `gps_fix_duration` milliseconds (default: 30 seconds)
+- **Failure handling**: If all attempts fail, setup continues without GPS location
+- **Indoor operation**: GPS location may be unavailable indoors but system continues normally
 
 #### Acquire time
 
-Time is acquired by reading the GPS module.
-It also captures the board time at the same moment, or as close as possible after it.
-This to enable time tracking without having to acquire it every time from the GPS module.
+Time acquisition from GPS is **mandatory** and will retry indefinitely until successful:
+
+- Time is acquired by reading the GPS module NMEA time sentences
+- Board timestamp is captured simultaneously for time tracking
+- Time acquisition typically succeeds even when location fix fails (indoor operation)
+- System cannot proceed without GPS time synchronization
+
+#### GPS Behavior Summary
+
+**Setup Phase:**
+- GPS location: Optional (configurable attempts/timeouts)
+- GPS time: Required (infinite retries until success)
+
+**Main Loop Phase:**
+- Every `gps_interval` iterations, attempt GPS data acquisition
+- **Time budget constraint**: GPS acquisition limited by remaining loop time
+- **Location recovery**: If no location fix during setup, main loop continues trying within time budget
+- **Graceful degradation**: Missing location data recorded as empty fields, does not block operation
 
 #### SD card access.
 
