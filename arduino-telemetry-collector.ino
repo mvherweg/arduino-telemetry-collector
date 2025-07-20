@@ -21,7 +21,6 @@ const unsigned int loop_duration = 100;
 const unsigned int telemetry_interval = 1;
 const unsigned int gps_interval = 10;
 const unsigned int write_interval = 146;  // SD card block optimization: 146 records × 28 bytes = 4,088 bytes ≈ 4KB block size
-const char write_prefix[] = "ATC_BMW";
 const unsigned int gps_fix_duration = 30000;
 const unsigned int gps_fix_tries = 2;
 
@@ -179,7 +178,15 @@ bool validateConfiguration() {
   if ((gps_interval * loop_duration) < 200) return false;
   if (write_interval < 1) return false;
   if (write_interval < gps_interval) return false;
-  if (strlen(write_prefix) < 1 || strlen(write_prefix) > 8) return false;
+  // Check for filename collision risk: ensure we don't write more than once per second
+  // Each file uses timestamp in seconds, so write_interval * loop_duration must be ≥ 1000ms
+  if ((write_interval * loop_duration) < 1000) {
+    Serial.println("Configuration error: risk of filename collisions");
+    Serial.print("Write interval * loop duration = ");
+    Serial.print(write_interval * loop_duration);
+    Serial.println("ms (must be ≥ 1000ms)");
+    return false;
+  }
   if (gps_fix_duration < 5000) return false; // Minimum 5 seconds
   // gps_fix_tries can be any value (0 = infinite)
 
@@ -586,26 +593,25 @@ void writeDataToSD() {
 }
 
 String generateFilename() {
-  // Reconstruct Unix timestamp from split format for filename
+  // Reconstruct Unix timestamp from split format
   unsigned long unix_seconds = (data_buffer[0].days_since_1970 * 86400UL) + (data_buffer[0].milliseconds_in_day / 1000UL);
 
-  // Use last 8 digits of Unix timestamp for strict 8.3 format
-  // Format: XXXXXXXX.ATC (exactly 8 chars + 3 char extension)
-  String timestamp_str = String(unix_seconds);
-  String filename;
-
-  if (timestamp_str.length() >= 8) {
-    // Take last 8 digits
-    filename = timestamp_str.substring(timestamp_str.length() - 8) + ".ATC";
-  } else {
-    // Pad with zeros if needed
-    filename = timestamp_str;
-    while (filename.length() < 8) {
-      filename = "0" + filename;
+  // Convert to 8-character hex format for alphabetical/chronological ordering
+  // Format: XXXXXXXX.ATC (exactly 8 hex chars + 3 char extension)
+  // Range: 00000000.ATC to FFFFFFFF.ATC (4.3 billion unique files, ~136 years)
+  String filename = "";
+  
+  // Convert to uppercase hex with leading zeros
+  for (int i = 7; i >= 0; i--) {
+    unsigned char hex_digit = (unix_seconds >> (i * 4)) & 0x0F;
+    if (hex_digit < 10) {
+      filename += (char)('0' + hex_digit);
+    } else {
+      filename += (char)('A' + hex_digit - 10);
     }
-    filename += ".ATC";
   }
-
+  
+  filename += ".ATC";
   return filename;
 }
 
