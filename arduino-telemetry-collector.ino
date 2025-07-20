@@ -261,8 +261,6 @@ bool initializeMPU6050() {
     uint8_t who_am_i = Wire.read();
     if (who_am_i == 0x68 || who_am_i == 0x70 || who_am_i == 0x71) {
       Serial.println("MPU sensor initialized successfully");
-      Serial.print("WHO_AM_I: 0x");
-      Serial.println(who_am_i, HEX);
       return true;
     }
   }
@@ -295,11 +293,6 @@ bool acquireGPSFix() {
       String gps_data = GPS_SERIAL.readStringUntil('\n');
       sentences_received++;
 
-      // Only show first few sentences for debugging
-      if (sentences_received <= 3) {
-        Serial.print("GPS data: ");
-        Serial.println(gps_data);
-      }
 
       if (parseGPSData(gps_data)) {
         if (gps_fix) {
@@ -326,8 +319,6 @@ bool acquireTime() {
       String gps_data = GPS_SERIAL.readStringUntil('\n');
       if (parseGPSTime(gps_data)) {
         gps_board_time = millis();
-        Serial.print("Time acquired: ");
-        Serial.println(gps_epoch_time);
         return true;
       }
     }
@@ -339,9 +330,6 @@ bool acquireTime() {
 }
 
 bool testSDWrite() {
-  Serial.println("Testing SD card write...");
-  Serial.print("Writing timestamp: ");
-  Serial.println(gps_epoch_time);
 
   // Remove existing file and create new one
   if (SD.exists("setup.txt")) {
@@ -356,7 +344,6 @@ bool testSDWrite() {
 
   test_file.println(gps_epoch_time);
   test_file.close();
-  Serial.println("Write operation completed");
 
   // Read back to verify
   test_file = SD.open("setup.txt", FILE_READ);
@@ -368,16 +355,10 @@ bool testSDWrite() {
   String read_data = test_file.readString();
   test_file.close();
 
-  Serial.print("Read back data: '");
-  Serial.print(read_data);
-  Serial.println("'");
-  Serial.print("Expected: ");
-  Serial.println(gps_epoch_time);
 
   // Trim whitespace for comparison
   read_data.trim();
   if (read_data.toInt() == gps_epoch_time) {
-    Serial.println("SD card write test passed");
     return true;
   }
 
@@ -625,16 +606,10 @@ void getCurrentTimestamp(uint16_t* days_since_1970, uint32_t* milliseconds_in_da
 }
 
 void writeDataToSD() {
-  if (buffer_index == 0) return;
 
   String filename = generateFilename();
   File data_file = SD.open(filename, FILE_WRITE);
-  if (!data_file) {
-    Serial.print("Failed to open file: ");
-    Serial.println(filename);
-    Serial.println("Possible causes: filename too long, SD card full, or corrupted");
-    return;
-  }
+  if (!data_file) return;  // Fail silently during runtime
 
   // Write binary data
   for (int i = 0; i < buffer_index; i++) {
@@ -752,9 +727,6 @@ void maintainLoopTiming(unsigned long loop_start) {
     // Store for next telemetry collection (clamp to uint8_t range)
     last_loop_skipped = (iterations_to_skip > 255) ? 255 : (uint8_t)iterations_to_skip;
     
-    Serial.print("Loop timing violation! Skipped ");
-    Serial.print(iterations_to_skip);
-    Serial.println(" iterations");
   }
 
   last_loop_time = millis();
