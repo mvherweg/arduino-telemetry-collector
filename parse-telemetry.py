@@ -191,11 +191,11 @@ def process_directory(input_dir, output_dir):
     # Create output directory if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Find all .atc files
-    atc_files = list(input_path.glob("*.atc"))
+    # Find all .atc files (case insensitive)
+    atc_files = list(input_path.glob("*.atc")) + list(input_path.glob("*.ATC"))
     
     if not atc_files:
-        print(f"No .atc files found in {input_dir}")
+        print(f"No .atc/.ATC files found in {input_dir}")
         return False
         
     print(f"Found {len(atc_files)} .atc files in {input_dir}")

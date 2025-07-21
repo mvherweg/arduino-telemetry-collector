@@ -3,8 +3,8 @@
 #include <SD.h>
 #include <SoftwareSerial.h>
 
-// Pin definitions
-const int RED_LED = 7;  // Error indication only
+// Pin definitions  
+const int RED_LED = 13;  // Error indication only - uses built-in LED
 const int SD_CS_PIN = 53;
 
 // MPU-6500 I2C address (same as MPU-6050)
@@ -17,10 +17,10 @@ const int MPU_ADDR = 0x68;
 const unsigned int blink_on_duration = 500;
 const unsigned int blink_off_duration = 500;
 const unsigned int blink_pause_duration = 2000;
-const unsigned int loop_duration = 100;
-const unsigned int telemetry_interval = 1;
-const unsigned int gps_interval = 10;
-const unsigned int write_interval = 146;  // SD card block optimization: 146 records × 28 bytes = 4,088 bytes ≈ 4KB block size
+const unsigned int loop_duration = 50;
+const unsigned int telemetry_interval = 1;   // Every 50ms = 20Hz data collection  
+const unsigned int gps_interval = 20;        // Every 1 second (20 × 50ms)  
+const unsigned int write_interval = 146;     // Keep same buffer size: 146 records × 28 bytes = 4,088 bytes ≈ 4KB block
 const unsigned int gps_fix_duration = 30000;
 const unsigned int gps_fix_tries = 2;
 
