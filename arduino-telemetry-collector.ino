@@ -2,6 +2,8 @@
 #include <SPI.h>
 #include <SD.h>
 #include <SoftwareSerial.h>
+#include <TinyGPS++.h>
+#include <TimeLib.h>
 
 // Pin definitions  
 const int RED_LED = 13;  // Error indication only - uses built-in LED
@@ -22,7 +24,7 @@ const unsigned int telemetry_interval = 1;   // Every 50ms = 20Hz data collectio
 const unsigned int gps_interval = 20;        // Every 1 second (20 × 50ms)  
 const unsigned int write_interval = 146;     // Keep same buffer size: 146 records × 28 bytes = 4,088 bytes ≈ 4KB block
 const unsigned int gps_fix_duration = 30000;
-const unsigned int gps_fix_tries = 2;
+const unsigned int gps_fix_tries = 4;
 
 
 // State variables
@@ -35,6 +37,7 @@ unsigned long gps_board_time = 0;  // millis() when GPS time was captured
 uint8_t last_loop_skipped = 0;  // Iterations skipped in last loop timing violation
 
 // GPS variables
+TinyGPSPlus gps;
 float latitude = 0.0;
 float longitude = 0.0;
 bool gps_fix = false;
@@ -143,6 +146,12 @@ void performSetup() {
       Serial.print(" of ");
       Serial.print(gps_fix_tries);
       Serial.println(" failed");
+      
+      // Wait 30 seconds before next attempt (except after last attempt)
+      if (attempt + 1 < gps_fix_tries) {
+        Serial.println("Waiting 30 seconds before next GPS attempt...");
+        delay(30000);
+      }
     }
     blinkError(4);
   }
@@ -257,26 +266,25 @@ bool acquireGPSFix() {
   Serial.print(gps_fix_duration / 1000);
   Serial.println(" seconds)...");
   unsigned long start_time = millis();
-  int sentences_received = 0;
+  int sentences_processed = 0;
 
   while (millis() - start_time < gps_fix_duration) {
     if (GPS_SERIAL.available()) {
-      String gps_data = GPS_SERIAL.readStringUntil('\n');
-      sentences_received++;
-
-
-      if (parseGPSData(gps_data)) {
+      if (gps.encode(GPS_SERIAL.read())) {
+        sentences_processed++;
+        updateGPSData();
+        
         if (gps_fix) {
           Serial.println("GPS fix acquired");
           return true;
         }
       }
     }
-    delay(100);
+    delay(10); // Shorter delay for more responsive parsing
   }
 
-  Serial.print("GPS fix acquisition failed (received ");
-  Serial.print(sentences_received);
+  Serial.print("GPS fix acquisition failed (processed ");
+  Serial.print(sentences_processed);
   Serial.println(" NMEA sentences)");
   return false;
 }
@@ -284,19 +292,36 @@ bool acquireGPSFix() {
 bool acquireTime() {
   Serial.println("Acquiring time from GPS...");
   unsigned long start_time = millis();
+  int sentences_processed = 0;
 
   while (millis() - start_time < 30000) { // 30 second timeout
     if (GPS_SERIAL.available()) {
-      String gps_data = GPS_SERIAL.readStringUntil('\n');
-      if (parseGPSTime(gps_data)) {
-        gps_board_time = millis();
-        return true;
+      if (gps.encode(GPS_SERIAL.read())) {
+        sentences_processed++;
+        updateGPSData();
+        
+        // Debug output every 10 sentences
+        if (sentences_processed % 10 == 0) {
+          Serial.print("Processed ");
+          Serial.print(sentences_processed);
+          Serial.print(" sentences. Date valid: ");
+          Serial.print(gps.date.isValid() ? "YES" : "NO");
+          Serial.print(", Time valid: ");
+          Serial.println(gps.time.isValid() ? "YES" : "NO");
+        }
+        
+        if (gps_epoch_time > 0) {
+          Serial.println("Time acquired from GPS");
+          return true;
+        }
       }
     }
-    delay(100);
+    delay(10); // Shorter delay for more responsive parsing
   }
 
-  Serial.println("Time acquisition failed");
+  Serial.print("Time acquisition failed after processing ");
+  Serial.print(sentences_processed);
+  Serial.println(" NMEA sentences");
   return false;
 }
 
@@ -394,188 +419,81 @@ void collectTelemetry() {
 }
 
 void acquireGPSData() {
-  if (GPS_SERIAL.available()) {
-    String gps_data = GPS_SERIAL.readStringUntil('\n');
-    parseGPSData(gps_data);
-    parseGPSTime(gps_data);
+  while (GPS_SERIAL.available()) {
+    if (gps.encode(GPS_SERIAL.read())) {
+      updateGPSData();
+    }
   }
 }
 
 void acquireGPSDataWithBudget(unsigned long time_budget_ms) {
   unsigned long start_time = millis();
 
-  // If we don't have a GPS fix, try to acquire one within time budget
-  if (!gps_fix && time_budget_ms > 50) { // Need at least 50ms to try
-    while (millis() - start_time < time_budget_ms) {
-      if (GPS_SERIAL.available()) {
-        String gps_data = GPS_SERIAL.readStringUntil('\n');
-        parseGPSData(gps_data);
-        parseGPSTime(gps_data);
-
+  // Try to acquire GPS data within time budget
+  while (millis() - start_time < time_budget_ms) {
+    if (GPS_SERIAL.available()) {
+      if (gps.encode(GPS_SERIAL.read())) {
+        updateGPSData();
         if (gps_fix) {
-          break; // Got fix, stop trying
+          break; // Got valid fix, stop trying
         }
       }
-      delay(10); // Small delay to avoid busy waiting
-    }
-  } else {
-    // Already have fix or no time budget, just update normally
-    acquireGPSData();
-  }
-}
-
-bool parseGPSData(String data) {
-  if (data.startsWith("$GPGGA") || data.startsWith("$GNGGA")) {
-    // Parse NMEA GGA sentence for position and satellite count
-    // Use direct char array access to avoid String operations
-    const char* nmea = data.c_str();
-    int comma_positions[14];
-    int comma_count = 0;
-    int len = data.length();
-
-    // Fast comma finding without charAt()
-    for (int i = 0; i < len && comma_count < 14; i++) {
-      if (nmea[i] == ',') {
-        comma_positions[comma_count++] = i;
-      }
-    }
-
-    if (comma_count >= 8) {
-      // Parse fix status first (fastest check)
-      int fix_start = comma_positions[5] + 1;
-      int fix_end = comma_positions[6];
-      if (fix_end > fix_start && nmea[fix_start] > '0') {
-        
-        // Parse satellite count directly from char array
-        int sat_start = comma_positions[6] + 1;
-        int sat_end = comma_positions[7];
-        if (sat_end > sat_start) {
-          int sat_count = 0;
-          for (int i = sat_start; i < sat_end; i++) {
-            if (nmea[i] >= '0' && nmea[i] <= '9') {
-              sat_count = sat_count * 10 + (nmea[i] - '0');
-            }
-          }
-          gps_satellites = (sat_count > 255) ? 255 : (uint8_t)sat_count;
-        }
-        
-        // Parse HDOP directly from char array
-        int hdop_start = comma_positions[7] + 1;
-        int hdop_end = comma_positions[8];
-        if (hdop_end > hdop_start) {
-          gps_hdop = atof(&nmea[hdop_start]);
-        }
-        
-        // Only create Strings for coordinate parsing (unavoidable due to convertNMEACoordinate)
-        String lat_str = data.substring(comma_positions[1] + 1, comma_positions[2]);
-        String lon_str = data.substring(comma_positions[3] + 1, comma_positions[4]);
-        
-        if (lat_str.length() > 0 && lon_str.length() > 0) {
-          latitude = convertNMEACoordinate(lat_str);
-          longitude = convertNMEACoordinate(lon_str);
-          gps_fix = true;
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-bool parseGPSTime(String data) {
-  if (data.startsWith("$GPRMC") || data.startsWith("$GNRMC")) {
-    // Parse NMEA RMC sentence for time
-    int comma_positions[12];
-    int comma_count = 0;
-
-    for (int i = 0; i < data.length() && comma_count < 12; i++) {
-      if (data.charAt(i) == ',') {
-        comma_positions[comma_count++] = i;
-      }
-    }
-
-    if (comma_count >= 9) {
-      String time_str = data.substring(comma_positions[0] + 1, comma_positions[1]);
-      String date_str = data.substring(comma_positions[8] + 1, comma_positions[9]);
-
-      if (time_str.length() >= 6 && date_str.length() >= 6) {
-        // Convert to epoch time (simplified)
-        gps_epoch_time = convertGPSTimeToEpoch(time_str, date_str);
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-float convertNMEACoordinate(String coord) {
-  if (coord.length() < 7) return 0.0; // Minimum: DDMM.MM
-
-  // NMEA format: DDMM.MMMM or DDDMM.MMMM
-  // Find decimal point
-  int decimal_pos = coord.indexOf('.');
-  if (decimal_pos < 3) return 0.0; // Invalid format
-
-  // Extract degrees (everything except last 2 digits before decimal)
-  float degrees = coord.substring(0, decimal_pos - 2).toFloat();
-
-  // Extract minutes (last 2 digits before decimal + decimal part)
-  float minutes = coord.substring(decimal_pos - 2).toFloat();
-
-  return degrees + minutes / 60.0;
-}
-
-unsigned long convertGPSTimeToEpoch(String time_str, String date_str) {
-  // Parse HHMMSS.SS format (e.g., "172741.00")
-  if (time_str.length() < 6) return 0;
-
-  int hours = time_str.substring(0, 2).toInt();
-  int minutes = time_str.substring(2, 4).toInt();
-  int seconds = time_str.substring(4, 6).toInt();
-
-  // Parse DDMMYY format (e.g., "200725" = July 25, 2020)
-  if (date_str.length() < 6) return 0;
-
-  int day = date_str.substring(0, 2).toInt();
-  int month = date_str.substring(2, 4).toInt();
-  int year = 2000 + date_str.substring(4, 6).toInt(); // Y2K handling for 2000-2099
-
-  // Calculate days since Unix epoch (Jan 1, 1970)
-  unsigned long days = 0;
-
-  // Add days for complete years
-  for (int y = 1970; y < year; y++) {
-    if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
-      days += 366; // Leap year
     } else {
-      days += 365;
+      delay(1); // Small delay when no data available
     }
   }
-
-  // Days in each month (non-leap year)
-  int monthDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-  // Adjust February for leap year
-  if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
-    monthDays[1] = 29;
-  }
-
-  // Add days for complete months in current year
-  for (int m = 1; m < month; m++) {
-    days += monthDays[m - 1];
-  }
-
-  // Add remaining days
-  days += day - 1; // Subtract 1 because day 1 = 0 days elapsed
-
-  // Convert to seconds and add time
-  unsigned long epoch = days * 86400UL; // 24 * 60 * 60
-  epoch += hours * 3600UL;
-  epoch += minutes * 60UL;
-  epoch += seconds;
-
-  return epoch;
 }
+
+void updateGPSData() {
+  // Update location data using TinyGPS++
+  if (gps.location.isValid()) {
+    latitude = gps.location.lat();
+    longitude = gps.location.lng();
+    gps_fix = true;
+  } else {
+    gps_fix = false;
+  }
+  
+  // Update satellite count
+  if (gps.satellites.isValid()) {
+    uint32_t sat_count = gps.satellites.value();
+    gps_satellites = (sat_count > 255) ? 255 : (uint8_t)sat_count;
+  }
+  
+  // Update HDOP
+  if (gps.hdop.isValid()) {
+    gps_hdop = gps.hdop.hdop();
+  }
+  
+  // Update time using TinyGPS++ and Time library
+  if (gps.date.isValid() && gps.time.isValid()) {
+    uint16_t year = gps.date.year();
+    uint8_t month = gps.date.month();
+    uint8_t day = gps.date.day();
+    uint8_t hour = gps.time.hour();
+    uint8_t minute = gps.time.minute();
+    uint8_t second = gps.time.second();
+    
+    // Additional validation - TinyGPS++ isValid() is not reliable enough
+    if (year >= 2020 && year <= 2030 && month >= 1 && month <= 12 && 
+        day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 59) {
+      
+      // Use Time library for clean epoch conversion
+      tmElements_t tm;
+      tm.Year = year - 1970;  // Time library counts from 1970
+      tm.Month = month;
+      tm.Day = day;
+      tm.Hour = hour;
+      tm.Minute = minute;
+      tm.Second = second;
+      
+      gps_epoch_time = makeTime(tm);
+      gps_board_time = millis();
+    }
+  }
+}
+
+
 
 void getCurrentTimestamp(uint16_t* days_since_1970, uint32_t* milliseconds_in_day) {
   unsigned long current_board_time = millis();
