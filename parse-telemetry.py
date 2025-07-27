@@ -179,7 +179,7 @@ def parse_telemetry_file(input_file_path, output_file_path):
         return False
 
 def process_directory(input_dir, output_dir):
-    """Process all .atc files in a directory."""
+    """Process all .atc files in a directory, skipping those that already have CSV versions."""
     
     input_path = Path(input_dir)
     output_path = Path(output_dir)
@@ -191,17 +191,43 @@ def process_directory(input_dir, output_dir):
     # Create output directory if it doesn't exist
     output_path.mkdir(parents=True, exist_ok=True)
     
+    # Find highest existing CSV file (filenames only increase alphabetically)
+    existing_csvs = list(output_path.glob("*.csv")) + list(output_path.glob("*.CSV"))
+    highest_csv = None
+    if existing_csvs:
+        # Sort by filename and get the highest one
+        existing_csvs.sort(key=lambda x: x.stem)
+        highest_csv = existing_csvs[-1].stem
+        print(f"Found {len(existing_csvs)} existing CSV files, highest: {highest_csv}.csv")
+    
     # Find all .atc files (case insensitive)
     atc_files = list(input_path.glob("*.atc")) + list(input_path.glob("*.ATC"))
     
     if not atc_files:
         print(f"No .atc/.ATC files found in {input_dir}")
         return False
+    
+    # Filter out .atc files that already have CSV versions (based on alphabetical ordering)
+    files_to_process = []
+    skipped_count = 0
+    
+    for atc_file in atc_files:
+        if highest_csv and atc_file.stem <= highest_csv:
+            skipped_count += 1
+        else:
+            files_to_process.append(atc_file)
+    
+    if skipped_count > 0:
+        print(f"Skipping {skipped_count} .atc files that already have CSV versions")
+    
+    if not files_to_process:
+        print("No new .atc files to process")
+        return True
         
-    print(f"Found {len(atc_files)} .atc files in {input_dir}")
+    print(f"Processing {len(files_to_process)} new .atc files")
     
     success_count = 0
-    for atc_file in atc_files:
+    for atc_file in files_to_process:
         # Generate output filename
         csv_filename = atc_file.stem + ".csv"
         csv_path = output_path / csv_filename
@@ -209,7 +235,7 @@ def process_directory(input_dir, output_dir):
         if parse_telemetry_file(atc_file, csv_path):
             success_count += 1
             
-    print(f"Successfully processed {success_count}/{len(atc_files)} files")
+    print(f"Successfully processed {success_count}/{len(files_to_process)} new files")
     return success_count > 0
 
 def process_single_file(input_file, output_file):
