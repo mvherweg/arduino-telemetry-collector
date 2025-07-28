@@ -47,7 +47,49 @@ The file header is exactly 16 bytes and appears once at the beginning of each fi
 - **Format**: 4 consecutive uint8 values
 - **Order**: [Accelerometer, Gyroscope, Magnetometer, GPS]
 
-**TODO**: Document the meaning and valid values for each sensor configuration byte.
+#### Accelerometer Configuration Byte
+
+The Accelerometer byte of the Sensor Configuration can be interpreted as specified below:
+
+- 0: No accelerometer sensor present/configured.
+- 1: Sensor measures in a -2g to +2g range.
+- 2: Sensor measures in a -4g to +4g range.
+- 3: Sensor measures in a -8g to +8g range.
+- 4: Sensor measures in a -16g to +16g range.
+
+Higher values are currently not in use and should not occur.
+When they do, the configuration should be considered invalid.
+
+#### Gyroscope Configuration Byte
+
+The Gyroscope byte of the Sensor Configuration can be interpreted as specified below:
+
+- 0: No gyroscope sensor present/configured.
+- 1: Sensor measures in a -250 deg/s to +250 deg/s range.
+- 2: Sensor measures in a -500 deg/s to +500 deg/s range.
+- 3: Sensor measures in a -1000 deg/s to +1000 deg/s range.
+- 4: Sensor measures in a -2000 deg/s to +2000 deg/s range.
+
+Higher values are currently not in use and should not occur.
+When they do, the configuration should be considered invalid.
+
+#### Magnetometer Configuration Byte
+
+The Magnetometer byte of the Sensor Configuration can be interpreted as specified below:
+
+- 0: No magnetometer sensor present/configured.
+
+As magnetometer reading is currently not supported, 0 is the only valid value.
+
+#### GPS Configuration Byte
+
+The GPS byte of the Sensor Configuration can be interpreted as specified below:
+
+- 0: No GPS sensor present/configured.
+- 1: Sensor configured to measure at 1 Hz navigation update rate.
+
+Higher values are currently not in use and should not occur.
+When they do, the configuration should be considered invalid.
 
 ### Reference Timestamp Seconds (4 bytes)
 

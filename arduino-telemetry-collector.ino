@@ -28,9 +28,9 @@ static const uint16_t GPS_TIME_WAIT_MS = 30000;
 static const int16_t SD_CS_PIN = 53;
 static const int16_t MPU_ADDR = 0x68; // MPU-6500 I2C address (same as MPU-6050)
 
-static const uint32_t BUFFER_SIZE_MAX = 5120;
-static const uint32_t FILE_SIZE_MAX = 1048576; // 128 * 1024 = 131072
-static const uint32_t OBS_SIZE_MAX = 33;       // 1 + 4 + 6 + 6 + 6 + 10 = 33
+static const uint32_t BUFFER_SIZE_MAX = 4096;  // SD block size
+static const uint32_t FILE_SIZE_MAX = 1048576; // 1024 * 1024
+static const uint32_t OBS_SIZE_MAX = 33;       // 1 + 4 + 6 + 6 + 6 + 10
 
 static const char MAGIC_BYTES[4] = {'A', 'T', 'C', '\0'};
 static const uint16_t VERSION = 0;
@@ -436,7 +436,7 @@ inline uint8_t writeGPS(byte8_t *writePtr) {
 
   // HDOP handling - NeoGPS stores HDOP as uint16_t * 1000
   if (fix.valid.hdop) {
-    float hdopValue = fix.hdop / 1000.0;                                      // Convert back to actual HDOP value
+    float32_t hdopValue = fix.hdop / 1000.0;                                  // Convert back to actual HDOP value
     uint8_t hdopByte = (hdopValue >= 25.5) ? 255 : (uint8_t)(hdopValue * 10); // Store as tenths
     writePtr[8] = hdopByte;
   } else {
