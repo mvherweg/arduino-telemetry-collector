@@ -16,190 +16,208 @@ typedef byte uint8_t;
 typedef unsigned int uint16_t;
 typedef unsigned long uint32_t;
 
-const char HEX_CHARS[] = "0123456789ABCDEF";
+static const char HEX_CHARS[] = "0123456789ABCDEF";
 
 static const uint8_t ERROR_LED = 13; // Error indication only - uses built-in LED
 static const uint32_t ERROR_LED_ON_MS = 250;
 static const uint32_t ERROR_LED_OFF_MS = 500;
 
-static const uint16_t BUFFER_MARGIN_BYTES = 32; // Must be at least size of SeriesHeader + largest possible Observation
-static const uint16_t BUNDLE_MARGIN_BYTES =
-    BUFFER_MARGIN_BYTES + 11; // Must also cover the BundleHeader, SensorConfig and ReferenceTimstamp.
-static const uint16_t BUFFER_SIZE_BYTES = 4096 + BUFFER_MARGIN_BYTES;
-
 #define GPS_SERIAL Serial1
 static const uint16_t GPS_FIX_WAIT_MS = 120000;
-
 static const uint16_t GPS_TIME_WAIT_MS = 30000;
-struct MicroTimestamp {
-  uint32_t epoch;
-  uint32_t micros;
-};
-MicroTimestamp *referenceTimestampPtr;
 
 static const int16_t SD_CS_PIN = 53;
 static const int16_t MPU_ADDR = 0x68; // MPU-6500 I2C address (same as MPU-6050)
 
-#define OBS_SENSOR_ACCELEROMETER 8 // Bit 3 in 4-bit field
-#define OBS_SENSOR_GYROSCOPE 4     // Bit 2 in 4-bit field
-// Magnetometer currently not supported. Reserved for future extension.
-#define OBS_SENSOR_MAGNETOMETER 2 // Bit 1 in 4-bit field
-#define OBS_SENSOR_GPS 1          // Bit 0 in 4-bit field
+static const uint16_t BUFFER_SIZE_MAX = 4096;
+static const uint32_t FILE_SIZE_MAX = 1024 * 1024;
+static const uint16_t OBS_SIZE_MAX = 1 + 4 + 6 + 6 + 6 + 10;
 
-static const uint32_t LOOP_DURATION_US = 10000; // 10ms = 100Hz
-static const uint16_t GPS_INTERVAL = 100;       // Every 100 iterations = 1Hz GPS updates
-static const uint32_t BUNDLE_SIZE_BYTES = 1024 * 1024;
+static const char MAGIC_BYTES[4] = {'A', 'T', 'C', '\0'};
+static const uint16_t VERSION = 0;
+
+static const uint16_t LOOP_MS = 10;
+static const uint16_t ACCEL_INTERVAL = 1;
+static const uint16_t GYRO_INTERVAL = 1;
+static const uint16_t MAGN_INTERVAL = 0;
+static const uint16_t GPS_INTERVAL = 100;
+static const uint16_t RESET_INTERVAL = 100;
+
+// Sensor configuration. See docs for meaning of values.
+static const byte8_t ATC_CFG_ACCL = 1;
+static const byte8_t ATC_CFG_GYRO = 1;
+static const byte8_t ATC_CFG_MAGN = 0;
+static const byte8_t ATC_CFG_GPS = 1;
+
+// Bitmap values to mark observation presence.
+static const byte8_t ATC_ROW_ACCL = 1;
+static const byte8_t ATC_ROW_GYRO = 2;
+static const byte8_t ATC_ROW_MAGN = 4;
+static const byte8_t ATC_ROW_GPS = 8;
+
+// Bitmap values to mark observation missing values.
+static const byte8_t ATC_NAN_ACCL = 16;
+static const byte8_t ATC_NAN_GYRO = 32;
+static const byte8_t ATC_NAN_MAGN = 64;
+static const byte8_t ATC_NAN_GPS = 128;
 
 TinyGPSPlus gps;
-byte8_t *bundlePtr;       // Fixed start position.
-byte8_t *writePtr;        // Current position.
-byte8_t *seriesHeaderPtr; // Used to update seriesObsCount in SeriesHeader.
-uint32_t bundleSize = 0;
-uint16_t gpsCountdown = 0; // Start with a GPS observation.
-uint8_t obsSensors = OBS_SENSOR_ACCELEROMETER | OBS_SENSOR_GYROSCOPE | OBS_SENSOR_GPS;
-uint16_t seriesObsCount = 0;
 char *fileName;
-uint32_t loopStart;
+uint32_t referenceEpochSeconds;
+uint16_t referenceEpochMillis;
+uint32_t referenceMillis;
+byte8_t *bufferRootPtr;
+byte8_t *bufferWritePtr;
+uint32_t fileSize = 0;
+uint32_t loopIteration = 0;
 
 void setup() {
   Serial.begin(9600);
   Serial.println("Arduino Telemetry Collector Starting...");
 
-  while (!initializeConfiguration()) {
-    blinkError(5);
-  }
+  initializeErrorLed();
 
-  if (!initializeGPS()) {
-    blinkError(4);
-  }
-
-  while (!initializeTime()) {
-    blinkError(3);
+  while (!initializeMemory()) {
+    blinkError(6);
   }
 
   while (!initializeMPU6050()) {
-    blinkError(2);
+    blinkError(5);
   }
 
   while (!initializeSD()) {
-    blinkError(1);
+    blinkError(4);
+  }
+
+  if (!initializeGPS()) {
+    blinkError(3);
+  }
+
+  while (!initializeTime()) {
+    blinkError(2);
   }
 
   Serial.println("Setup completed - entering main loop");
 }
 
 void loop() {
-  // Debug: Confirm loop is running
-  static uint32_t loop_count = 0;
-  loop_count++;
+  uint32_t loopStart = millis();
 
-  Serial.print("Loop start: ");
-  Serial.println(loop_count);
-
-  if (writePtr == bundlePtr) {
-    Serial.println("First bundle - initializing...");
-    Serial.println("Calling updateFileName...");
-    updateFileName();
-    Serial.println("Calling writeBundleHeader...");
-    writePtr = writeBundleHeader(bundlePtr);
-    Serial.println("Calling writeSensorConfig...");
-    writePtr = writeSensorConfig(writePtr);
-    Serial.println("Calling writeReferenceTimestamp...");
-    writePtr = writeReferenceTimestamp(writePtr);
-    seriesHeaderPtr = writePtr;
-    Serial.println("Bundle initialization complete");
-  }
-
-  Serial.println("Starting GPS interval logic...");
-  Serial.print("gpsCountdown=");
-  Serial.print(gpsCountdown);
-  Serial.print(", seriesObsCount before=");
-  Serial.println(seriesObsCount);
-  
-  // TODO(michiel): bit clunky, might be simpler to build the bitmask every iteration and compare it with the last
-  if (GPS_INTERVAL > 1) { // Logic only relevant if not every iteration contains GPS.
-    if (!gpsCountdown) {  // Countdown over, need a GPS measurement.
-      gpsCountdown = GPS_INTERVAL;
-      writeSeriesHeader(seriesHeaderPtr, seriesObsCount, obsSensors); // Finishing the previous series.
-      obsSensors |= OBS_SENSOR_GPS;
-      seriesObsCount = 0;
-    } else if (gpsCountdown == GPS_INTERVAL - 1) { // Last obs had GPS, this one not.
-      writeSeriesHeader(seriesHeaderPtr, seriesObsCount, obsSensors);
-      obsSensors &= (~OBS_SENSOR_GPS);
-      seriesObsCount = 0;
+  if (!fileSize && bufferWritePtr == bufferRootPtr) { // Start of a new file;
+    // Get new reference timing
+    while (!updateReferenceTime()) {
+      blinkError(2);
+      delay(LOOP_MS);
     }
-    gpsCountdown--;
+
+    // Set filename
+    setFileName(referenceEpochSeconds);
+
+    // Set up header
+    char *magicBytesPtr = (char *)bufferWritePtr;
+    for (uint8_t i = 0; i < sizeof(MAGIC_BYTES); i++) {
+      magicBytesPtr[i] = MAGIC_BYTES[i];
+      bufferWritePtr++;
+    }
+
+    uint16_t *versionPtr = (uint16_t *)bufferWritePtr;
+    versionPtr[0] = VERSION;
+    bufferWritePtr += 2;
+
+    *bufferWritePtr++ = ATC_CFG_ACCL;
+    *bufferWritePtr++ = ATC_CFG_GYRO;
+    *bufferWritePtr++ = ATC_CFG_MAGN;
+    *bufferWritePtr++ = ATC_CFG_GPS;
+
+    uint32_t *referenceEpochSecondsPtr = (uint32_t *)bufferWritePtr;
+    referenceEpochSecondsPtr[0] = referenceEpochSeconds;
+    bufferWritePtr += 4;
+
+    uint16_t *referenceEpochMillisPtr = (uint16_t *)bufferWritePtr;
+    referenceEpochMillisPtr[0] = referenceEpochMillis;
+    bufferWritePtr += 2;
   }
 
-  Serial.println("Starting series header logic...");
-  if (!seriesObsCount) {
-    seriesHeaderPtr = writePtr;
-    writePtr = writeSeriesHeader(writePtr, seriesObsCount, obsSensors);
+  // Infer which fields are required;
+  if (loopIteration == RESET_INTERVAL) {
+    loopIteration = 1;
+  } else {
+    loopIteration++;
   }
 
-  Serial.println("Starting timing logic...");
+  byte8_t *rowConfigPtr = bufferWritePtr++;    // We set it later when we know any missing data.
+  bufferWritePtr += writeTime(bufferWritePtr); // writeTime always succeeds, advance pointer
 
-  // TODO(michiel): at this point in the loop we need to delay to get regular interval
-  uint32_t timePassed = micros() - loopStart;
-  if (timePassed < LOOP_DURATION_US) {
-    delayUs(LOOP_DURATION_US - timePassed);
-  }
-  loopStart = micros();
-
-  Serial.println("Starting telemetry collection...");
-  seriesObsCount++;
-  writePtr = writeTimestampOffset(writePtr);
-
-  // Debug output every 100 observations to avoid serial overload
-  if (seriesObsCount % 100 == 0) {
-    Serial.print("Loop status: obs=");
-    Serial.print(seriesObsCount);
-    Serial.print(", bufSize=");
-    Serial.print(writePtr - bundlePtr);
-    Serial.print(", sensors=");
-    Serial.println(obsSensors);
-  }
-  if (obsSensors & OBS_SENSOR_ACCELEROMETER) {
-    writePtr = writeAccelerometerReading(writePtr);
-  }
-  if (obsSensors & OBS_SENSOR_GYROSCOPE) {
-    writePtr = writeGyroscopeReading(writePtr);
-  }
-  if (obsSensors & OBS_SENSOR_MAGNETOMETER) {
-    writePtr = writeMagnetometerReading(writePtr);
-  }
-  if (obsSensors & OBS_SENSOR_GPS) {
-    writePtr = writeGPSReading(writePtr);
-  }
-
-  uint32_t bufferSize = writePtr - bundlePtr;
-  bool8_t seriesFull = seriesObsCount == 4095;
-  bool8_t bufferNearlyFull = bufferSize > BUFFER_SIZE_BYTES - BUFFER_MARGIN_BYTES;
-  bool8_t bundleNearlyFull = bundleSize + bufferSize > BUNDLE_SIZE_BYTES - BUNDLE_MARGIN_BYTES;
-  bool8_t timerNearlyOverrun = 4294967295 - (micros() - referenceTimestampPtr->micros) < 2 * LOOP_DURATION_US;
-  if (seriesFull || bufferNearlyFull || bundleNearlyFull || timerNearlyOverrun) {
-    Serial.print("Flushing buffer: seriesObsCount=");
-    Serial.print(seriesObsCount);
-    Serial.print(", bufferSize=");
-    Serial.println(bufferSize);
-
-    writeSeriesHeader(seriesHeaderPtr, seriesObsCount, obsSensors); // Update observation count in SeriesHeader
-    if (bundleSize) {
-      bundleSize += dumpBuffer(seriesHeaderPtr);
+  byte8_t rowSensors = 0;
+  if (ACCEL_INTERVAL && loopIteration % ACCEL_INTERVAL == 0) {
+    rowSensors |= ATC_ROW_ACCL;
+    uint8_t bytesWritten = writeAccelerometer(bufferWritePtr);
+    if (bytesWritten) {
+      bufferWritePtr += bytesWritten;
     } else {
-      bundleSize = dumpBuffer(bundlePtr);
+      rowSensors |= ATC_NAN_ACCL;
     }
-    seriesObsCount = 0;
   }
+  if (GYRO_INTERVAL && loopIteration % GYRO_INTERVAL == 0) {
+    rowSensors |= ATC_ROW_GYRO;
+    uint8_t bytesWritten = writeGyroscope(bufferWritePtr);
+    if (bytesWritten) {
+      bufferWritePtr += bytesWritten;
+    } else {
+      rowSensors |= ATC_NAN_GYRO;
+    }
+  }
+  if (MAGN_INTERVAL && loopIteration % MAGN_INTERVAL == 0) {
+    rowSensors |= ATC_ROW_MAGN;
+    uint8_t bytesWritten = writeMagnetometer(bufferWritePtr);
+    if (bytesWritten) {
+      bufferWritePtr += bytesWritten;
+    } else {
+      rowSensors |= ATC_NAN_MAGN;
+    }
+  }
+  if (GPS_INTERVAL && loopIteration % GPS_INTERVAL == 0) {
+    rowSensors |= ATC_ROW_GPS;
+    uint8_t bytesWritten = writeGPS(bufferWritePtr);
+    if (bytesWritten) {
+      bufferWritePtr += bytesWritten;
+    } else {
+      rowSensors |= ATC_NAN_GPS;
+    }
+  }
+  *rowConfigPtr = rowSensors; // Writing the row config now it is fully known
 
-  if (bundleNearlyFull || timerNearlyOverrun) { // Bundle nearing its limit(s), start new bundle.
-    bundleSize = 0;
-    writePtr = bundlePtr;
+  // If buffer is nearly full or close to too big for the file, flush it
+  uint32_t bufferSize = bufferWritePtr - bufferRootPtr;
+  bool8_t bufferNearlyFull = bufferSize > BUFFER_SIZE_MAX - OBS_SIZE_MAX;
+  bool8_t fileNearlyFull = fileSize + bufferSize > FILE_SIZE_MAX - OBS_SIZE_MAX;
+  if (bufferNearlyFull || fileNearlyFull) {
+    while (!writeToFile(bufferRootPtr, bufferSize, fileName)) {
+      blinkError(4);
+    }
+    bufferWritePtr = bufferRootPtr;
+
+    if (fileNearlyFull) {
+      fileSize = 0; // Start new file
+    } else {
+      fileSize += bufferSize;
+    }
   }
 
   // Process any new GPS data
   while (GPS_SERIAL.available()) {
     gps.encode(GPS_SERIAL.read());
+  }
+
+  // Wait with next loop if finished too early
+  uint32_t loopTime = millis() - loopStart;
+  if (LOOP_MS > loopTime) {
+    delay(LOOP_MS - loopTime);
+    digitalWrite(ERROR_LED, LOW);
+  } else if (LOOP_MS < loopTime) {
+    digitalWrite(ERROR_LED, HIGH);
+  } else {
+    digitalWrite(ERROR_LED, LOW);
   }
 }
 
@@ -220,39 +238,24 @@ void blinkError(int16_t blink_count) {
   delay(ERROR_LED_ON_MS + ERROR_LED_OFF_MS);
 }
 
-void delayUs(uint32_t us) {
-  if (us >= 16384) { // delayMicroseconds not reliable beyond this range
-    uint32_t start = micros();
-    delay((uint32_t)(us / 1000));
-    uint32_t remainder = us % 1000;
-    uint32_t usToWait = remainder - (micros() - start);
-    if (remainder > usToWait) { // Else overrun happened: we are running behind.
-      delayMicroseconds(usToWait);
-    }
-  } else {
-    delayMicroseconds(us);
-  }
-}
-
-bool8_t initializeConfiguration() {
-  loopStart = micros();
-
+bool8_t initializeMemory() {
   fileName = (char *)malloc(13 * sizeof(char));
+  if (fileName == NULL) {
+    Serial.println("Failed to allocate memory for filename");
+    return false;
+  }
   fileName[8] = '.';
   fileName[9] = 'A';
   fileName[10] = 'T';
   fileName[11] = 'C';
   fileName[12] = '\0';
 
-  referenceTimestampPtr = (MicroTimestamp *)malloc(sizeof(MicroTimestamp));
-
-  // Allocate bundle buffer space
-  bundlePtr = (byte8_t *)malloc(BUFFER_SIZE_BYTES * sizeof(byte8_t));
-  writePtr = bundlePtr;
-  if (bundlePtr == NULL) {
+  bufferRootPtr = (byte8_t *)malloc(BUFFER_SIZE_MAX);
+  if (bufferRootPtr == NULL) {
     Serial.println("Failed to allocate memory for byte buffer");
     return false;
   }
+  bufferWritePtr = bufferRootPtr;
   return true;
 }
 
@@ -290,7 +293,7 @@ bool8_t initializeTime() {
   while (millis() - initialTime <= GPS_TIME_WAIT_MS) {
     if (GPS_SERIAL.available()) {
       gps.encode(GPS_SERIAL.read());
-      if (gps.time.isUpdated() && gps.time.isValid() && updateReferenceTimestamp()) {
+      if (gps.time.isUpdated() && gps.time.isValid() && updateReferenceTime()) {
         return true;
       }
     }
@@ -369,141 +372,83 @@ bool8_t initializeMPU6050() {
   return false;
 }
 
-inline byte8_t *writeBundleHeader(byte8_t *buffer) {
-  /// Write the BundleHeader into a byte buffer.
-  ///
-  /// \param buffer The byte buffer location to write into.
-  /// \return Pointer to the next byte after the BundleHeader.
-  buffer[0] = 0;
-  buffer[1] = 0;
-  return buffer + 2;
-}
-
-inline byte8_t *writeSensorConfig(byte8_t *buffer) {
-  // TODO(michiel): this is correct for the platform but means we have logic here and logic in the initialization
-  buffer[0] = 0;
-  buffer[1] = 0;
-  return buffer + 2;
-}
-
-inline byte8_t *writeReferenceTimestamp(byte8_t *buffer) {
-  updateReferenceTimestamp();
-  uint32_t *castPtr = (uint32_t *)buffer;
-  castPtr[0] = referenceTimestampPtr->epoch;
-  return buffer + 4;
-}
-
-inline byte8_t *writeSeriesHeader(byte8_t *buffer, uint16_t seriesObsCount, uint8_t sensors) {
-  // Assumes seriesObsCount value is valid.
-  uint16_t *castPtr = (uint16_t *)buffer;
-  castPtr[0] = (sensors << 12) + seriesObsCount;
-  return buffer + 2;
-}
-
-inline byte8_t *writeTimestampOffset(byte8_t *buffer) {
+inline uint8_t writeTime(byte8_t *writePtr) {
   // No overrun check, assuming we are never going to get close
-  uint32_t *castPtr = (uint32_t *)buffer;
-  castPtr[0] = micros() - referenceTimestampPtr->micros;
-  return buffer + 4;
+  uint32_t *timePtr = (uint32_t *)writePtr;
+  timePtr[0] = millis() - referenceMillis;
+
+  return 4; // Always succeeds, returns bytes written
 }
 
-inline byte8_t *writeAccelerometerReading(byte8_t *buffer) {
-  /// Write the Accelerometer measurements into a byte buffer.
-  ///
-  /// \param buffer The byte buffer location to write into.
-  /// \return Pointer to the next byte after the Accelerometermeasurements.
+inline uint8_t writeAccelerometer(byte8_t *writePtr) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x3B); // ACCEL_XOUT_H
   Wire.endTransmission(false);
   uint8_t received = Wire.requestFrom(MPU_ADDR, 6, true);
 
-  int16_t *castPtr = (int16_t *)buffer;
+  int16_t *castPtr = (int16_t *)writePtr;
   if (received == 6) {
     for (uint8_t i = 0; i < 3; i++) {
       castPtr[i] = Wire.read() << 8 | Wire.read();
     }
-  } else {
-    // Fill with zeros if I2C failed - this shouldn't happen often
-    Serial.println("Accel I2C failed!");
-    for (uint8_t i = 0; i < 3; i++) {
-      castPtr[i] = 0;
-    }
+    return 6; // Success: return bytes written
   }
-  return buffer + 6;
+  return 0; // Failure: return 0 bytes written
 }
 
-inline byte8_t *writeGyroscopeReading(byte8_t *buffer) {
-  /// Write the Gyroscope measurements into a byte buffer.
-  ///
-  /// \param buffer The byte buffer location to write into.
-  /// \return Pointer to the next byte after the Gyroscope measurements.
+inline uint8_t writeGyroscope(byte8_t *writePtr) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(0x43); // GYRO_XOUT_H
   Wire.endTransmission(false);
   uint8_t received = Wire.requestFrom(MPU_ADDR, 6, true);
 
-  int16_t *castPtr = (int16_t *)buffer;
+  int16_t *castPtr = (int16_t *)writePtr;
   if (received == 6) {
     for (uint8_t i = 0; i < 3; i++) {
       castPtr[i] = Wire.read() << 8 | Wire.read();
     }
-  } else {
-    // Fill with zeros if I2C failed
-    for (uint8_t i = 0; i < 3; i++) {
-      castPtr[i] = 0;
-    }
+    return 6; // Success: return bytes written
   }
-  return buffer + 6;
+  return 0; // Failure: return 0 bytes written
 }
 
-inline byte8_t *writeMagnetometerReading(byte8_t *buffer) {
-  /// Write the Magnetometer measurements into a byte buffer.
-  ///
-  /// \param buffer The byte buffer location to write into.
-  /// \return Pointer to the next byte after the Magnetometermeasurements.
-
-  int16_t *castPtr = (int16_t *)buffer;
-  for (uint8_t i = 0; i < 3; i++) {
-    castPtr[i] = 0; // Hardware does not contain Magnetometer.
-  }
-  return buffer + 6;
+inline uint8_t writeMagnetometer(byte8_t *writePtr) {
+  return 0; // Always fail: return 0 bytes written
 }
 
-inline byte8_t *writeGPSReading(byte8_t *buffer) {
-  if (gps.location.isValid()) {
-    float32_t *castPtr = (float32_t *)buffer;
-    castPtr[0] = gps.location.lng();
-    castPtr[1] = gps.location.lat();
-  } else {
-    for (uint8_t i = 0; i < 8; i++) {
-      buffer[i] = 0;
-    }
+inline uint8_t writeGPS(byte8_t *writePtr) {
+  if (!gps.location.isValid()) {
+    return 0; // Failure: return 0 bytes written
   }
+
+  float32_t *castPtr = (float32_t *)writePtr;
+  castPtr[0] = gps.location.lng();
+  castPtr[1] = gps.location.lat();
 
   if (gps.hdop.isValid()) {
     if (gps.hdop.value() >= 25500) {
-      buffer[8] = 255;
+      writePtr[8] = 255;
     } else {
-      buffer[8] = (uint8_t)ceil(gps.hdop.value() / 100.0);
+      writePtr[8] = (uint8_t)ceil(gps.hdop.value() / 100.0);
     }
   } else {
-    buffer[8] = 0;
+    writePtr[8] = 0;
   }
 
   if (gps.satellites.isValid()) {
     if (gps.satellites.value() >= 255) {
-      buffer[9] = 255;
+      writePtr[9] = 255;
     } else {
-      buffer[9] = (uint8_t)gps.satellites.value();
+      writePtr[9] = (uint8_t)gps.satellites.value();
     }
   } else {
-    buffer[9] = 0;
+    writePtr[9] = 0;
   }
 
-  return buffer + 10;
+  return 10; // Success: return bytes written
 }
 
-bool8_t updateReferenceTimestamp() {
+bool8_t updateReferenceTime() {
   if (gps.time.isValid()) {
     tmElements_t tm;
     tm.Year = gps.date.year() - 1970; // Time library counts from 1970
@@ -513,30 +458,30 @@ bool8_t updateReferenceTimestamp() {
     tm.Minute = gps.time.minute();
     tm.Second = gps.time.second();
 
-    referenceTimestampPtr->epoch = makeTime(tm);
-    referenceTimestampPtr->micros = micros() - ((uint32_t)gps.time.centisecond() * 10000);
-    return referenceTimestampPtr->epoch > 1735689600; // Timestamps lower than this suggest date/time is incorrect.
+    referenceEpochSeconds = makeTime(tm);
+    referenceEpochMillis = gps.time.centisecond() * 10;
+    referenceMillis = millis();
+    return referenceEpochSeconds > 1735689600; // Timestamps lower than this suggest date/time is incorrect.
   }
   return false;
 }
 
-uint32_t dumpBuffer(byte8_t *firstBytePtr) {
-  File dataFile = SD.open(fileName, FILE_WRITE);
-  if (!dataFile) {
+inline bool8_t writeToFile(byte8_t *buffer, uint16_t size, char *fName) {
+  File fHandle = SD.open(fName, FILE_WRITE);
+  if (!fHandle) {
     Serial.println("Could not open SD card file.");
     blinkError(1);
-    return 0; // Fail silently during runtime
+    return false; // Fail silently during runtime
   }
 
-  uint32_t writeSize = (writePtr - firstBytePtr) * sizeof(byte8_t);
-  dataFile.write(firstBytePtr, writeSize);
-  dataFile.close();
+  fHandle.write(buffer, size);
+  fHandle.close();
 
-  return writeSize;
+  return true;
 }
 
-inline void *updateFileName() {
+inline void *setFileName(uint32_t epoch) {
   for (int16_t i = 7; i >= 0; i--) {
-    fileName[i] = HEX_CHARS[(referenceTimestampPtr->epoch >> (i * 4)) & 0x0F];
+    fileName[7-i] = HEX_CHARS[(epoch >> (i * 4)) & 0x0F];
   }
 }
