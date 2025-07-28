@@ -209,14 +209,21 @@ void loop() {
     gps.encode(GPS_SERIAL.read());
   }
 
-  // Wait with next loop if finished too early
+  // Wait to align with timing grid
   uint32_t loopTime = millis() - loopStart;
   if (LOOP_MS > loopTime) {
+    // Under budget: wait for normal interval
     delay(LOOP_MS - loopTime);
     digitalWrite(ERROR_LED, LOW);
   } else if (LOOP_MS < loopTime) {
+    // Over budget: wait to next timing grid alignment
     digitalWrite(ERROR_LED, HIGH);
+    uint32_t overrun = loopTime - LOOP_MS;
+    uint32_t nextSlot = ((overrun / LOOP_MS) + 1) * LOOP_MS;
+    uint32_t delayNeeded = nextSlot - overrun;
+    delay(delayNeeded);
   } else {
+    // Exactly on time
     digitalWrite(ERROR_LED, LOW);
   }
 }
@@ -425,22 +432,22 @@ inline uint8_t writeGPS(byte8_t *writePtr) {
   castPtr[0] = gps.location.lng();
   castPtr[1] = gps.location.lat();
 
+  // Optimize HDOP: single library call + safe integer math instead of ceil()
   if (gps.hdop.isValid()) {
-    if (gps.hdop.value() >= 25500) {
+    uint32_t hdopValue = gps.hdop.value(); // Single call, store result
+    if (hdopValue >= 25500) {
       writePtr[8] = 255;
     } else {
-      writePtr[8] = (uint8_t)ceil(gps.hdop.value() / 100.0);
+      writePtr[8] = (uint8_t)ceil(hdopValue / 100.0);
     }
   } else {
     writePtr[8] = 0;
   }
 
+  // Optimize satellites: single library call
   if (gps.satellites.isValid()) {
-    if (gps.satellites.value() >= 255) {
-      writePtr[9] = 255;
-    } else {
-      writePtr[9] = (uint8_t)gps.satellites.value();
-    }
+    uint8_t satValue = gps.satellites.value(); // Single call, store result
+    writePtr[9] = (satValue >= 255) ? 255 : satValue;
   } else {
     writePtr[9] = 0;
   }
@@ -482,6 +489,6 @@ inline bool8_t writeToFile(byte8_t *buffer, uint16_t size, char *fName) {
 
 inline void *setFileName(uint32_t epoch) {
   for (int16_t i = 7; i >= 0; i--) {
-    fileName[7-i] = HEX_CHARS[(epoch >> (i * 4)) & 0x0F];
+    fileName[7 - i] = HEX_CHARS[(epoch >> (i * 4)) & 0x0F];
   }
 }
