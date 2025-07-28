@@ -1,8 +1,7 @@
+#include <NMEAGPS.h>
 #include <SD.h>
 #include <SPI.h>
 #include <SoftwareSerial.h>
-#include <TimeLib.h>
-#include <TinyGPS++.h>
 #include <Wire.h>
 
 typedef bool bool8_t;
@@ -29,9 +28,9 @@ static const uint16_t GPS_TIME_WAIT_MS = 30000;
 static const int16_t SD_CS_PIN = 53;
 static const int16_t MPU_ADDR = 0x68; // MPU-6500 I2C address (same as MPU-6050)
 
-static const uint16_t BUFFER_SIZE_MAX = 4096;
-static const uint32_t FILE_SIZE_MAX = 1024 * 1024;
-static const uint16_t OBS_SIZE_MAX = 1 + 4 + 6 + 6 + 6 + 10;
+static const uint32_t BUFFER_SIZE_MAX = 5120;
+static const uint32_t FILE_SIZE_MAX = 1048576; // 128 * 1024 = 131072
+static const uint32_t OBS_SIZE_MAX = 33;       // 1 + 4 + 6 + 6 + 6 + 10 = 33
 
 static const char MAGIC_BYTES[4] = {'A', 'T', 'C', '\0'};
 static const uint16_t VERSION = 0;
@@ -61,7 +60,8 @@ static const byte8_t ATC_NAN_GYRO = 32;
 static const byte8_t ATC_NAN_MAGN = 64;
 static const byte8_t ATC_NAN_GPS = 128;
 
-TinyGPSPlus gps;
+NMEAGPS gps;
+gps_fix fix;
 char *fileName;
 uint32_t referenceEpochSeconds;
 uint16_t referenceEpochMillis;
@@ -204,9 +204,9 @@ void loop() {
     }
   }
 
-  // Process any new GPS data
-  while (GPS_SERIAL.available()) {
-    gps.encode(GPS_SERIAL.read());
+  // Process any new GPS data (non-blocking)
+  while (gps.available(GPS_SERIAL)) {
+    fix = gps.read();
   }
 
   // Wait to align with timing grid
@@ -281,9 +281,10 @@ bool8_t initializeGPS() {
 
   uint32_t initialTime = millis();
   while (millis() - initialTime <= GPS_FIX_WAIT_MS) {
-    if (GPS_SERIAL.available()) {
-      gps.encode(GPS_SERIAL.read());
-      if (gps.location.isUpdated() && gps.location.isValid()) {
+    while (gps.available(GPS_SERIAL)) {
+      fix = gps.read();
+      if (fix.valid.location) {
+        Serial.println("GPS fix acquired");
         return true;
       }
     }
@@ -298,9 +299,10 @@ bool8_t initializeTime() {
 
   uint32_t initialTime = millis();
   while (millis() - initialTime <= GPS_TIME_WAIT_MS) {
-    if (GPS_SERIAL.available()) {
-      gps.encode(GPS_SERIAL.read());
-      if (gps.time.isUpdated() && gps.time.isValid() && updateReferenceTime()) {
+    while (gps.available(GPS_SERIAL)) {
+      fix = gps.read();
+      if (fix.valid.date && fix.valid.time && updateReferenceTime()) {
+        Serial.println("GPS time synchronized");
         return true;
       }
     }
@@ -424,29 +426,26 @@ inline uint8_t writeMagnetometer(byte8_t *writePtr) {
 }
 
 inline uint8_t writeGPS(byte8_t *writePtr) {
-  if (!gps.location.isValid()) {
+  if (!fix.valid.location) {
     return 0; // Failure: return 0 bytes written
   }
 
   float32_t *castPtr = (float32_t *)writePtr;
-  castPtr[0] = gps.location.lng();
-  castPtr[1] = gps.location.lat();
+  castPtr[0] = fix.longitude();
+  castPtr[1] = fix.latitude();
 
-  // Optimize HDOP: single library call + safe integer math instead of ceil()
-  if (gps.hdop.isValid()) {
-    uint32_t hdopValue = gps.hdop.value(); // Single call, store result
-    if (hdopValue >= 25500) {
-      writePtr[8] = 255;
-    } else {
-      writePtr[8] = (uint8_t)ceil(hdopValue / 100.0);
-    }
+  // HDOP handling - NeoGPS stores HDOP as uint16_t * 1000
+  if (fix.valid.hdop) {
+    float hdopValue = fix.hdop / 1000.0;                                      // Convert back to actual HDOP value
+    uint8_t hdopByte = (hdopValue >= 25.5) ? 255 : (uint8_t)(hdopValue * 10); // Store as tenths
+    writePtr[8] = hdopByte;
   } else {
     writePtr[8] = 0;
   }
 
-  // Optimize satellites: single library call
-  if (gps.satellites.isValid()) {
-    uint8_t satValue = gps.satellites.value(); // Single call, store result
+  // Satellites handling
+  if (fix.valid.satellites) {
+    uint8_t satValue = fix.satellites;
     writePtr[9] = (satValue >= 255) ? 255 : satValue;
   } else {
     writePtr[9] = 0;
@@ -456,18 +455,15 @@ inline uint8_t writeGPS(byte8_t *writePtr) {
 }
 
 bool8_t updateReferenceTime() {
-  if (gps.time.isValid()) {
-    tmElements_t tm;
-    tm.Year = gps.date.year() - 1970; // Time library counts from 1970
-    tm.Month = gps.date.month();
-    tm.Day = gps.date.day();
-    tm.Hour = gps.time.hour();
-    tm.Minute = gps.time.minute();
-    tm.Second = gps.time.second();
+  if (fix.valid.date && fix.valid.time) {
+    // NeoGPS uses Y2K epoch (2000), convert to Unix epoch (1970)
+    // The Y2K to Unix epoch offset is 946684800 seconds (30 years)
+    uint32_t y2k_timestamp = (NeoGPS::clock_t)fix.dateTime;
+    referenceEpochSeconds = y2k_timestamp + 946684800;
 
-    referenceEpochSeconds = makeTime(tm);
-    referenceEpochMillis = gps.time.centisecond() * 10;
     referenceMillis = millis();
+    referenceEpochMillis = referenceMillis;
+
     return referenceEpochSeconds > 1735689600; // Timestamps lower than this suggest date/time is incorrect.
   }
   return false;
